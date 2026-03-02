@@ -54,7 +54,7 @@ DEFAULT_MODELS: dict[ModelProvider, str] = {
 # Default base URLs for providers that don't use the canonical OpenAI endpoint
 DEFAULT_BASE_URLS: dict[ModelProvider, str] = {
     ModelProvider.DEEPSEEK: "https://api.deepseek.com",
-    ModelProvider.QWEN:     "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    ModelProvider.QWEN:     "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",  # Singapore international endpoint
     ModelProvider.GROK:     "https://api.x.ai/v1",
     ModelProvider.MINIMAX:  "https://api.minimax.chat/v1",
     ModelProvider.KIMI:     "https://api.moonshot.cn/v1",
