@@ -29,8 +29,8 @@ DEFAULT_MODELS: dict[ModelProvider, str] = {
     # Swap back to "o3-pro" once OpenAI verifies the organisation.
     ModelProvider.O3PRO:    "o3-mini",          # TODO: revert to "o3-pro"
 
-    # DeepSeek  — V3.2 Speciale
-    ModelProvider.DEEPSEEK: "deepseek-v3.2-speciale",      # TODO: verify spelling/string
+    # DeepSeek  — V3.2 (deepseek-chat = non-thinking; deepseek-reasoner = CoT/thinking)
+    ModelProvider.DEEPSEEK: "deepseek-chat",               # deepseek-chat → DeepSeek-V3.2
 
     # Google Gemini  — 3.1 Pro
     ModelProvider.GEMINI:   "gemini-3.1-pro-preview",       # preview string confirmed via ListModels
