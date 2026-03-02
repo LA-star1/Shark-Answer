@@ -10,7 +10,7 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)  # override=True ensures .env always wins over shell env vars
 
 
 class Subject(str, Enum):

@@ -17,12 +17,15 @@ logger = logging.getLogger(__name__)
 #       before deploying to production.
 # ──────────────────────────────────────────────────────────────────────────────
 DEFAULT_MODELS: dict[ModelProvider, str] = {
-    # Anthropic  — Opus 4.6  (strongest reasoning + vision)
-    ModelProvider.CLAUDE:   "claude-opus-4-6-20250901",    # TODO: verify date suffix
+    # Anthropic — use claude-opus-4-5 if available; fall back to sonnet-4
+    # TODO: verify latest Opus string via console.anthropic.com/docs/models
+    ModelProvider.CLAUDE:   "claude-opus-4-5",
 
     # OpenAI  — two separate instances from the same API key
-    ModelProvider.GPT4O:    "gpt-5.2-thinking",            # TODO: verify model string
-    ModelProvider.O3PRO:    "o3-pro",                      # confirmed real model
+    # GPT4O keeps gpt-4o (vision-safe, known working); override via model_name in .env
+    # when gpt-5.2-thinking or newer is confirmed available.
+    ModelProvider.GPT4O:    "gpt-4o",
+    ModelProvider.O3PRO:    "o3-pro",
 
     # DeepSeek  — V3.2 Speciale
     ModelProvider.DEEPSEEK: "deepseek-v3.2-speciale",      # TODO: verify spelling/string
