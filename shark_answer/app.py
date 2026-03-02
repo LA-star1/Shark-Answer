@@ -442,17 +442,38 @@ async def chat_correction(req: ChatRequest):
 
     # Call Claude as judge via the provider registry
     try:
-        from shark_answer.providers.claude_provider import ClaudeProvider
         from shark_answer.config import ModelProvider
 
-        claude = _registry.get_provider(ModelProvider.CLAUDE)
+        claude = _registry.get(ModelProvider.CLAUDE)
         if claude is None:
             raise HTTPException(503, "Claude provider not configured")
 
-        import asyncio
+        # Build a single prompt string (base generate() doesn't support multi-turn messages)
+        if not history:
+            prompt = (
+                f"Context:\n"
+                f"Question {req.question_number}: {qr['question_text']}\n"
+                f"Subject: {qr['subject']} | Pipeline: {qr['pipeline']}\n\n"
+                f"Generated Answer (Version 1):\n{answer_context}\n\n"
+                f"Student question: {req.message}"
+            )
+        else:
+            parts: list[str] = []
+            for i, turn in enumerate(history):
+                content = turn["content"]
+                if i == 0 and content.startswith("[Context]"):
+                    p = content.split("[Student question]\n", 1)
+                    content = p[1] if len(p) > 1 else content
+                prefix = "Student" if turn["role"] == "user" else "You"
+                parts.append(f"{prefix}: {content}")
+            parts.append(f"Student: {req.message}")
+            prompt = "\n\n".join(parts)
+
         response = await claude.generate(
+            prompt=prompt,
             system=system_prompt,
-            messages=messages_for_api,
+            temperature=0.3,
+            max_tokens=2048,
         )
 
         if not response.success:
@@ -471,20 +492,19 @@ async def chat_correction(req: ChatRequest):
     if not history:
         history.append({
             "role": "user",
-            "content": messages_for_api[0]["content"],
+            "content": f"[Context]\nQuestion {req.question_number}: {qr['question_text']}\n\n[Student question]\n{req.message}",
         })
     else:
         history.append({"role": "user", "content": req.message})
     history.append({"role": "assistant", "content": reply_text})
 
-    # Return public-facing history (strip system context prefix from first msg)
+    # Return public-facing history (strip context prefix from first msg)
     public_history = []
     for i, turn in enumerate(history):
         content = turn["content"]
         if i == 0 and turn["role"] == "user" and content.startswith("[Context]"):
-            # Extract just the student question part
-            parts = content.split("[Student question]\n", 1)
-            content = parts[1] if len(parts) > 1 else content
+            parts_pub = content.split("[Student question]\n", 1)
+            content = parts_pub[1] if len(parts_pub) > 1 else content
         public_history.append({"role": turn["role"], "content": content})
 
     return ChatResponse(reply=reply_text, chat_history=public_history)
@@ -706,6 +726,53 @@ async def health():
     }
 
 
+@app.get("/api/debug/models")
+async def debug_models():
+    """Test every configured model with a hello-world prompt.
+
+    Returns pass/fail/error for each model so you can see which providers
+    are actually working vs silently failing.
+    """
+    if not _config or not _registry:
+        raise HTTPException(500, "Server not initialized")
+
+    results: dict[str, dict] = {}
+    for provider in list(_config.models.keys()):
+        inst = _registry.get(provider)
+        if inst is None:
+            results[provider.value] = {"status": "not_configured", "model": ""}
+            continue
+        try:
+            resp = await inst.generate(
+                prompt="Hello. Please respond with just the single word: OK",
+                system="",
+                temperature=0.0,
+                max_tokens=20,
+            )
+            results[provider.value] = {
+                "status": "ok" if resp.success else "error",
+                "model": resp.model_name,
+                "response": resp.content[:120].strip() if resp.success else None,
+                "error": resp.error if not resp.success else None,
+                "latency_s": round(resp.latency_seconds, 2),
+                "input_tokens": resp.usage.input_tokens,
+                "output_tokens": resp.usage.output_tokens,
+            }
+        except Exception as exc:
+            results[provider.value] = {
+                "status": "exception",
+                "model": getattr(inst, "model_name", ""),
+                "error": str(exc),
+            }
+
+    ok_count = sum(1 for v in results.values() if v["status"] == "ok")
+    return {
+        "total_configured": len(_config.models),
+        "total_ok": ok_count,
+        "models": results,
+    }
+
+
 # ===========================================================
 # Helper functions
 # ===========================================================
@@ -902,17 +969,90 @@ def _generate_xlsx(data: dict) -> bytes:
     return buf.getvalue()
 
 
-# ---- PDF export (unchanged) ----
+# ---- PDF helpers ----
+
+def _strip_latex_for_pdf(text: str) -> str:
+    """Convert LaTeX delimiters to plain text for PDF rendering.
+
+    Strips $ and $$ markers but keeps the formula content readable.
+    E.g.  $F = ma$  →  F = ma
+          $$\\int_0^1 x dx$$  →  ∫₀¹ x dx (simplified)
+    """
+    import re
+    # Display math $$...$$
+    text = re.sub(r'\$\$(.+?)\$\$', lambda m: f'[{m.group(1).strip()}]', text, flags=re.DOTALL)
+    # Inline math $...$
+    text = re.sub(r'\$(.+?)\$', lambda m: m.group(1).strip(), text)
+    # Remove \left, \right, \mathrm{} etc — keep content
+    text = re.sub(r'\\(?:left|right|mathrm|mathbf|text)\{([^}]*)\}', r'\1', text)
+    text = re.sub(r'\\(?:left|right)[.()\[\]|]', '', text)
+    # Replace common LaTeX macros
+    text = text.replace('\\times', '×').replace('\\cdot', '·')
+    text = text.replace('\\alpha', 'α').replace('\\beta', 'β').replace('\\gamma', 'γ')
+    text = text.replace('\\delta', 'δ').replace('\\Delta', 'Δ').replace('\\pi', 'π')
+    text = text.replace('\\mu', 'μ').replace('\\sigma', 'σ').replace('\\omega', 'ω')
+    text = text.replace('\\Omega', 'Ω').replace('\\lambda', 'λ').replace('\\theta', 'θ')
+    text = text.replace('\\int', '∫').replace('\\sum', '∑').replace('\\infty', '∞')
+    text = text.replace('\\geq', '≥').replace('\\leq', '≤').replace('\\neq', '≠')
+    text = text.replace('\\approx', '≈').replace('\\pm', '±').replace('\\sqrt', '√')
+    text = text.replace('\\frac', '/').replace('^', '^').replace('_{', '_')
+    # Strip remaining backslash commands
+    text = re.sub(r'\\[a-zA-Z]+\*?', '', text)
+    text = re.sub(r'[{}]', '', text)
+    return text
+
+
+def _pdf_safe(text: str) -> str:
+    """Make text safe for reportlab (XML-escape + strip control chars)."""
+    import re
+    text = _strip_latex_for_pdf(text)
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # Strip non-printable control characters (keep newlines/tabs)
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+    return text
+
+
+def _try_register_unicode_font() -> str:
+    """Try to register a Unicode-capable TTF font; return font name or 'Helvetica'."""
+    import os
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    candidates = [
+        # macOS
+        '/System/Library/Fonts/Supplemental/Arial Unicode MS.ttf',
+        '/Library/Fonts/Arial Unicode MS.ttf',
+        '/System/Library/Fonts/Times New Roman.ttf',
+        '/System/Library/Fonts/Helvetica.ttc',
+        # Linux
+        '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+        '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
+        '/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf',
+        # Windows
+        'C:/Windows/Fonts/arial.ttf',
+        'C:/Windows/Fonts/calibri.ttf',
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            try:
+                pdfmetrics.registerFont(TTFont('UniFont', path))
+                return 'UniFont'
+            except Exception:
+                continue
+    return 'Helvetica'
+
+
+# ---- PDF export ----
 
 def _generate_pdf(data: dict) -> bytes:
-    """Generate a PDF from results data using reportlab."""
+    """Generate a PDF from results data using reportlab with Unicode font support."""
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.units import mm
-    from reportlab.platypus import (
-        SimpleDocTemplate, Paragraph, Spacer, PageBreak,
-    )
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+
+    body_font = _try_register_unicode_font()
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -923,19 +1063,26 @@ def _generate_pdf(data: dict) -> bytes:
     styles = getSampleStyleSheet()
     styles.add(ParagraphStyle(
         "SharkTitle", parent=styles["Heading1"],
-        fontSize=22, spaceAfter=12, textColor=colors.HexColor("#2563eb"),
+        fontSize=20, spaceAfter=10, textColor=colors.HexColor("#1d4ed8"),
+        fontName=body_font,
     ))
     styles.add(ParagraphStyle(
         "SharkH2", parent=styles["Heading2"],
-        fontSize=14, spaceAfter=8, textColor=colors.HexColor("#1e40af"),
+        fontSize=13, spaceAfter=6, textColor=colors.HexColor("#1e40af"),
+        fontName=body_font,
+    ))
+    styles.add(ParagraphStyle(
+        "SharkH3", parent=styles["Heading3"],
+        fontSize=11, spaceAfter=4, textColor=colors.HexColor("#2563eb"),
+        fontName=body_font,
     ))
     styles.add(ParagraphStyle(
         "SharkBody", parent=styles["BodyText"],
-        fontSize=10, leading=14, spaceAfter=6,
+        fontSize=10, leading=15, spaceAfter=5, fontName=body_font,
     ))
     styles.add(ParagraphStyle(
         "SharkMeta", parent=styles["BodyText"],
-        fontSize=8, textColor=colors.grey, spaceAfter=4,
+        fontSize=8, textColor=colors.grey, spaceAfter=4, fontName=body_font,
     ))
 
     story: list = []
@@ -948,38 +1095,38 @@ def _generate_pdf(data: dict) -> bytes:
     story.append(Paragraph(
         f"Subject: {subject.replace('_', ' ').title()} &nbsp;|&nbsp; "
         f"Questions: {data.get('total_questions', 0)} &nbsp;|&nbsp; "
-        f"Total cost: ${data.get('cost_summary', {}).get('total_cost_usd', 0):.4f}",
+        f"Cost: ${data.get('cost_summary', {}).get('total_cost_usd', 0):.4f}",
         styles["SharkMeta"],
     ))
-    story.append(Spacer(1, 10))
+    story.append(Spacer(1, 8))
 
     for qr in data.get("results", []):
-        story.append(Paragraph(f"Question {qr['question_number']}", styles["SharkH2"]))
-        q_text = (qr.get("question_text", "")
-                  .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
-        story.append(Paragraph(q_text, styles["SharkBody"]))
-        story.append(Spacer(1, 6))
+        story.append(Paragraph(
+            _pdf_safe(f"Question {qr['question_number']}"),
+            styles["SharkH2"],
+        ))
+        story.append(Paragraph(
+            _pdf_safe(qr.get("question_text", "")).replace("\n", "<br/>"),
+            styles["SharkBody"],
+        ))
+        story.append(Spacer(1, 4))
 
         for v in qr.get("versions", []):
             badge = " [VERIFIED]" if v.get("verified") else ""
-            story.append(Paragraph(
-                f"<b>Version {v['version_number']}: {v.get('approach_label', '')}</b>"
-                f" ({v.get('provider', '')}){badge}",
-                styles["SharkH2"],
-            ))
-            answer_text = (v.get("answer_text", "")
-                           .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                           .replace("\n", "<br/>"))
+            lbl = _pdf_safe(
+                f"Version {v['version_number']}: {v.get('approach_label', '')} "
+                f"({v.get('provider', '')}){badge}"
+            )
+            story.append(Paragraph(f"<b>{lbl}</b>", styles["SharkH3"]))
+            answer_text = _pdf_safe(v.get("answer_text", "")).replace("\n", "<br/>")
             story.append(Paragraph(answer_text, styles["SharkBody"]))
-            story.append(Spacer(1, 6))
+            story.append(Spacer(1, 4))
 
             if v.get("explanation_text"):
                 story.append(Paragraph("<b>Explanation:</b>", styles["SharkBody"]))
-                expl = (v["explanation_text"]
-                        .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                        .replace("\n", "<br/>"))
+                expl = _pdf_safe(v["explanation_text"]).replace("\n", "<br/>")
                 story.append(Paragraph(expl, styles["SharkBody"]))
-                story.append(Spacer(1, 8))
+                story.append(Spacer(1, 6))
 
         story.append(PageBreak())
 

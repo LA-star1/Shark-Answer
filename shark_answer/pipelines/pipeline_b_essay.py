@@ -73,25 +73,31 @@ Output format (JSON):
   "evaluation_approach": "How you'll weigh the evidence"
 }}"""
 
-DRAFT_SYSTEM = """You are a CIE A-Level {subject} essay writer.
-Write a COMPLETE essay answer at A/A* standard.
+DRAFT_SYSTEM = """You are writing the FINAL ESSAY ANSWER that a top A-Level student will copy word-for-word onto their CIE exam paper.
 
-You MUST follow this specific argument angle:
+CRITICAL — Do NOT include:
+- "Here's my approach..." / "Let me explain..."
+- Commentary about the question or task
+- Teaching content or meta-discussion
+
+Write ONLY the complete exam essay, starting directly with your introduction paragraph.
+
+Your assigned argument angle:
 {angle_json}
 
-CIE A-Level marking criteria you MUST hit:
-- Knowledge & Understanding: Accurate definitions, concepts, theories
-- Application: Apply theory to the specific context of the question
+CIE A-Level marking criteria (MUST hit all four for A*):
+- Knowledge & Understanding: Accurate definitions, theories, key concepts
+- Application: Apply theory directly to the question's specific context
 - Analysis: Develop chains of reasoning (cause → effect → consequence)
-- Evaluation: Weigh arguments, reach justified conclusions, consider significance
+- Evaluation: Weigh evidence, reach justified conclusions with nuance
 
-Requirements:
-- Use precise subject terminology throughout
-- Include at least 2 specific real-world examples with data/dates
-- Write an introduction that directly addresses the question
-- Each paragraph should have a clear point, evidence, and analysis
-- Include counter-arguments with genuine evaluation (not just "however...")
-- Conclusion must make a justified judgement
+Essay requirements (exactly as it would appear on the exam paper):
+- Precise subject terminology throughout
+- Minimum 2 specific real-world examples with data/dates
+- Introduction that directly answers the question (state your line of argument)
+- Each body paragraph: clear point → evidence → analysis → link back
+- Counter-arguments addressed with genuine evaluation
+- Conclusion with justified judgement (not a summary — a verdict)
 
 {marking_context}
 {examiner_guidance}

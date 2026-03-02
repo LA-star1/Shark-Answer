@@ -34,32 +34,40 @@ from shark_answer.utils.math_verifier import verify_numeric_agreement
 
 logger = logging.getLogger(__name__)
 
-SOLVE_SYSTEM = """You are an expert CIE A-Level examiner and tutor.
-Solve the following question at A/A* standard.
+SOLVE_SYSTEM = """You are writing the FINAL ANSWER that a top A-Level student will copy word-for-word onto their CIE exam paper. This must be a complete, ready-to-submit exam answer — NOT a lesson, NOT a tutorial, NOT an explanation of the question.
 
-Requirements:
-- Show ALL working clearly (method marks matter)
-- State formulas before substituting values
-- Include correct SI units at every step
-- For multi-part questions, clearly label each part
-- Use proper mathematical notation
-- If a diagram would help, describe it in [DIAGRAM: ...]
-- Give the final answer with appropriate significant figures and units
+CRITICAL — Do NOT include:
+- "Here's how to approach this..." / "Let me explain..."
+- Meta-commentary about the question
+- Teaching or learning content
+- Anything the student wouldn't write on their paper
+
+DO write (exactly as it would appear on the exam paper):
+- All required working steps with clear labels (a), (b)(i), etc.
+- Formulas stated before substitution: F = ma → F = (2.0)(5.0) = 10 N
+- Every numerical step shown (method marks)
+- Correct SI units at every step and in the final answer
+- Significant figures matching the question data
+- Diagrams described inline as [DIAGRAM: ...]
+- Final boxed answer per sub-part
+
+Answer style: {answer_style}
 
 {marking_context}
 {examiner_guidance}"""
 
-ALTERNATIVE_METHODS_SYSTEM = """You are an expert CIE A-Level tutor.
-Solve this question using a DIFFERENT method than the one shown below.
+ALTERNATIVE_METHODS_SYSTEM = """You are writing an ALTERNATIVE exam answer using a completely different method.
 
-The question has already been solved using: {existing_method}
-You MUST use a completely different approach. For example:
-- If they used energy conservation → use Newton's laws / kinematics
-- If they used differentiation → use geometric / graphical approach
-- If they used simultaneous equations → use matrix method or substitution
-- If they used integration by parts → use substitution or partial fractions
+The question was already solved using: {existing_method}
+You MUST use a different mathematical approach:
+- Energy conservation → Newton's laws / kinematics
+- Differentiation → geometric / graphical method
+- Simultaneous equations → matrix or substitution method
+- Integration by parts → substitution or partial fractions
 
-Generate a COMPLETE solution at A/A* standard with full working.
+Write the answer exactly as a student would write it on the CIE exam paper. Full working, correct units, final answer with s.f. No teaching commentary.
+
+Answer style: {answer_style}
 
 {marking_context}
 {examiner_guidance}"""
@@ -107,7 +115,17 @@ async def run_pipeline_a(
     if examiner_profile:
         examiner_guidance = examiner_profile.to_prompt_guidance()
 
+    # Version style labels (V1=Formal, V2=Concise, V3=Natural Voice)
+    VERSION_STYLES = [
+        "Formal Academic — precise, complete, examiner-approved phrasing",
+        "Concise — same key steps, half the words, bullet-point format where allowed",
+        "Natural Voice — written as a top student would naturally write it in an exam",
+        "Alternative Method — different mathematical approach, same final answer",
+        "Extended Working — maximum marks shown, every assumption stated explicitly",
+    ]
+
     system_prompt = SOLVE_SYSTEM.format(
+        answer_style=VERSION_STYLES[0],
         marking_context=marking_context,
         examiner_guidance=examiner_guidance,
     )
@@ -179,16 +197,24 @@ async def run_pipeline_a(
                         )
                         break
 
-    # Step 4: Create answer versions
-    # Version 1-N from primary model outputs
+    # Step 4: Create answer versions (each model generates with its own style prompt)
+    style_labels = [
+        "V1 — Formal Academic",
+        "V2 — Concise",
+        "V3 — Natural Voice",
+        "V4 — Alternative Method",
+        "V5 — Extended Working",
+    ]
+
     for i, (model, resp) in enumerate(successful[:max_versions]):
+        style_idx = min(i, len(VERSION_STYLES) - 1)
         version = AnswerVersion(
             version_number=i + 1,
             answer_text=resp.content,
             provider=model.value,
             verified=is_calc and result.disagreement_resolved,
             language=language,
-            approach_label=f"Primary solution ({model.value})",
+            approach_label=style_labels[i] if i < len(style_labels) else f"V{i+1}",
         )
         result.versions.append(version)
 
@@ -196,35 +222,38 @@ async def run_pipeline_a(
     remaining_slots = max_versions - len(result.versions)
     if remaining_slots > 0 and successful:
         best_answer = successful[0][1].content
-        alt_system = ALTERNATIVE_METHODS_SYSTEM.format(
-            existing_method="the approach shown below",
-            marking_context=marking_context,
-            examiner_guidance=examiner_guidance,
-        )
-        alt_prompt = (
-            f"Original question:\n{question.text}\n\n"
-            f"Already solved with this approach:\n{best_answer}\n\n"
-            f"Now solve using a COMPLETELY DIFFERENT method.{lang_suffix}"
-        )
-
-        # Use the first available primary model for alternatives
-        alt_model = primary_models[0]
         for j in range(remaining_slots):
+            style_idx = len(result.versions)
+            style = VERSION_STYLES[min(style_idx, len(VERSION_STYLES) - 1)]
+            alt_system = ALTERNATIVE_METHODS_SYSTEM.format(
+                existing_method="the approach shown below",
+                answer_style=style,
+                marking_context=marking_context,
+                examiner_guidance=examiner_guidance,
+            )
+            alt_prompt = (
+                f"Original question:\n{question.text}\n\n"
+                f"Already solved with this approach:\n{best_answer}\n\n"
+                f"Now solve using a COMPLETELY DIFFERENT method.{lang_suffix}"
+            )
+            alt_model = primary_models[0]
             alt_response = await registry.call_models_parallel(
                 providers=[alt_model],
                 prompt=alt_prompt,
                 system=alt_system,
-                temperature=0.5 + j * 0.1,  # slight variation
+                temperature=0.5 + j * 0.1,
                 max_tokens=4096,
             )
             cost_tracker.record_batch(alt_response, subject, "A-alt")
             if alt_response[0].success:
+                v_num = len(result.versions) + 1
+                lbl = style_labels[v_num - 1] if v_num - 1 < len(style_labels) else f"V{v_num} — Alt {j+1}"
                 version = AnswerVersion(
-                    version_number=len(result.versions) + 1,
+                    version_number=v_num,
                     answer_text=alt_response[0].content,
                     provider=alt_model.value,
                     language=language,
-                    approach_label=f"Alternative method {j + 1}",
+                    approach_label=lbl,
                 )
                 result.versions.append(version)
 

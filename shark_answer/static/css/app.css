@@ -242,20 +242,76 @@
   overflow: hidden;
 }
 
-/* Chat panel body collapse */
-#chatPanelBody {
-  /* height transition handled by hidden class toggle */
+/* ── Paper-version tabs ── */
+.paper-tab-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 20px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+.paper-tab {
+  padding: 8px 20px;
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: 10px;
+  cursor: pointer;
+  color: #a1a1aa;
+  border: 1px solid transparent;
+  transition: all 0.15s;
+  background: #18181b;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.paper-tab:hover { color: #e4e4e7; background: #27272a; border-color: #3f3f46; }
+.paper-tab.active {
+  color: #e4e4e7;
+  background: #1e3a6e;
+  border-color: #3672fc;
+  box-shadow: 0 0 0 1px rgba(54, 114, 252, 0.25);
 }
 
-/* Chat message bubbles */
-#chatMessages {
+.paper-panel {
+  /* container for one full paper version */
+}
+
+/* ── Right chat sidebar ── */
+#chatSidebar {
+  /* Fixed panel — transition from registry.py  */
+}
+#chatSidebar #chatMessages {
   scrollbar-width: thin;
   scrollbar-color: #3f3f46 transparent;
 }
+#chatSidebar #chatMessages > div {
+  animation: fadeIn 0.18s ease;
+}
+
+/* Chat toggle button active state */
+.active-chat-btn {
+  background: rgba(30, 82, 242, 0.3) !important;
+  border-color: rgba(54, 114, 252, 0.5) !important;
+  color: #90b8ff !important;
+}
+
+/* Main area padding-right transitions smoothly */
+#mainArea {
+  transition: padding-right 0.3s ease;
+}
+
+/* Chat message bubbles */
 #chatMessages > div {
   animation: fadeIn 0.2s ease;
 }
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(4px); }
   to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Question text line clamp */
+.line-clamp-3 {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }

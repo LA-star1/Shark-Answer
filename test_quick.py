@@ -848,8 +848,8 @@ class TestChatEndpoint:
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             resp = await client.get("/")
             assert resp.status_code == 200
-            assert "chatPanel" in resp.text
-            assert "Answer Correction Chat" in resp.text
+            assert "chatSidebar" in resp.text
+            assert "Ask Claude" in resp.text
 
     @pytest.mark.asyncio
     async def test_index_accepts_pdf_docx(self):
@@ -894,6 +894,21 @@ class TestLiveAPI:
             assert resp.status_code == 200
             data = resp.json()
             assert data["status"] == "ok"
+
+    @pytest.mark.asyncio
+    async def test_debug_models_endpoint_exists(self):
+        """Verify /api/debug/models endpoint returns expected structure."""
+        from httpx import AsyncClient, ASGITransport
+        from shark_answer.app import app
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/api/debug/models")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert "models" in data
+            assert "total_configured" in data
+            assert "total_ok" in data
 
     @pytest.mark.asyncio
     async def test_examiner_profiles_endpoint(self):

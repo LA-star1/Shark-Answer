@@ -33,30 +33,32 @@ from shark_answer.utils.image_extractor import ExtractedQuestion
 
 logger = logging.getLogger(__name__)
 
-CS_SOLVE_SYSTEM = """You are a CIE A-Level Computer Science expert.
-Solve the following question at A/A* standard.
+CS_SOLVE_SYSTEM = """You are writing the FINAL ANSWER that a top A-Level student will copy word-for-word onto their CIE Computer Science exam paper. This must be a complete, ready-to-submit exam answer — NOT a lesson, NOT a tutorial.
 
-CRITICAL: CIE Pseudocode Conventions (Cambridge notation):
-- Use DECLARE for variable declarations: DECLARE x : INTEGER
-- Use ← for assignment (not = or :=)
-- Use IF...THEN...ELSE...ENDIF
-- Use WHILE...DO...ENDWHILE
-- Use FOR...TO...NEXT (or FOR...TO...STEP...NEXT)
-- Use REPEAT...UNTIL
-- Use CASE OF...OTHERWISE...ENDCASE
-- Use PROCEDURE name(params) ... ENDPROCEDURE
-- Use FUNCTION name(params) RETURNS type ... RETURN value ... ENDFUNCTION
-- Use CALL for procedure calls
-- Use OPENFILE, READFILE, WRITEFILE, CLOSEFILE for file operations
-- Use INPUT and OUTPUT (not READ/PRINT)
+CRITICAL — Do NOT include teaching preamble like "Here's how to approach this..." or "Let me explain...". Write ONLY the direct exam answer.
+
+CIE Pseudocode Conventions (Cambridge notation) — MUST follow exactly:
+- DECLARE x : INTEGER  (variable declarations)
+- ← for assignment (not = or :=)
+- IF...THEN...ELSE...ENDIF
+- WHILE...DO...ENDWHILE
+- FOR...TO...NEXT (or FOR...TO...STEP...NEXT)
+- REPEAT...UNTIL
+- CASE OF...OTHERWISE...ENDCASE
+- PROCEDURE name(params) ... ENDPROCEDURE
+- FUNCTION name(params) RETURNS type ... RETURN value ... ENDFUNCTION
+- CALL for procedure calls
+- OPENFILE, READFILE, WRITEFILE, CLOSEFILE
+- INPUT and OUTPUT (not READ/PRINT)
 - Array indices start at 1 (not 0) unless specified
-- String operations: LENGTH(), SUBSTRING(), UCASE(), LCASE()
-- Use & for string concatenation
+- String: LENGTH(), SUBSTRING(), UCASE(), LCASE(), & for concatenation
 
 For theory questions:
-- Define key terms precisely
-- Use diagrams where helpful (described in [DIAGRAM: ...])
-- Give examples to illustrate concepts
+- Write precise definitions (exactly as they'd earn marks)
+- Use [DIAGRAM: ...] for any required diagrams
+- Give examples only where the mark scheme explicitly rewards them
+
+Answer style: {answer_style}
 
 {marking_context}
 {examiner_guidance}"""
@@ -121,7 +123,16 @@ async def run_pipeline_c(
 
     lang_suffix = "\n\nProvide your answer in Chinese (简体中文), but keep code/pseudocode in English." if language == "zh" else ""
 
+    VERSION_STYLES = [
+        "Formal Academic — precise CIE-standard phrasing, full working",
+        "Concise — same logic, minimal words, clear structure",
+        "Natural Voice — written as a top student would naturally write it",
+        "Alternative Algorithm — different data structure or algorithm approach",
+        "Extended — maximum marks, every edge case handled explicitly",
+    ]
+
     system_prompt = CS_SOLVE_SYSTEM.format(
+        answer_style=VERSION_STYLES[0],
         marking_context=marking_context,
         examiner_guidance=examiner_guidance,
     )
@@ -157,20 +168,28 @@ async def run_pipeline_c(
     # Step 2: For code questions, verify by execution
     is_code = question.question_type in ("code", "pseudocode")
 
-    for model, resp in successful:
+    style_labels = [
+        "V1 — Formal Academic",
+        "V2 — Concise",
+        "V3 — Natural Voice",
+        "V4 — Alternative Algorithm",
+        "V5 — Extended Working",
+    ]
+
+    for i, (model, resp) in enumerate(successful):
         verified = False
         if is_code:
             verified = await _verify_code(
                 resp.content, question.text, registry, config, cost_tracker, subject
             )
-
+        lbl = style_labels[i] if i < len(style_labels) else f"V{i+1} — Solution"
         version = AnswerVersion(
             version_number=len(result.versions) + 1,
             answer_text=resp.content,
             provider=model.value,
             verified=verified,
             language=language,
-            approach_label=f"Solution ({model.value})",
+            approach_label=lbl,
         )
         result.versions.append(version)
 
@@ -206,13 +225,15 @@ async def run_pipeline_c(
                         alt_resp[0].content, question.text,
                         registry, config, cost_tracker, subject,
                     )
+                v_num = len(result.versions) + 1
+                lbl = style_labels[v_num - 1] if v_num - 1 < len(style_labels) else f"V{v_num} — Alt {j+1}"
                 version = AnswerVersion(
-                    version_number=len(result.versions) + 1,
+                    version_number=v_num,
                     answer_text=alt_resp[0].content,
                     provider=alt_model.value,
                     verified=verified,
                     language=language,
-                    approach_label=f"Alternative algorithm {j + 1}",
+                    approach_label=lbl,
                 )
                 result.versions.append(version)
 
