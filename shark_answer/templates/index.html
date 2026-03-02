@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Shark Answer</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+  <link rel="stylesheet" href="/static/css/app.css">
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            shark: {
+              50:  '#eef4ff',
+              100: '#dae6ff',
+              200: '#bdd4ff',
+              300: '#90b8ff',
+              400: '#5b92ff',
+              500: '#3672fc',
+              600: '#1e52f2',
+              700: '#163ddf',
+              800: '#1833b4',
+              900: '#1a308e',
+              950: '#141f56',
+            }
+          }
+        }
+      }
+    }
+  </script>
+</head>
+<body class="bg-zinc-950 text-zinc-100 min-h-screen flex">
+
+  <!-- ===== LEFT SIDEBAR ===== -->
+  <aside id="sidebar" class="w-72 bg-zinc-900 border-r border-zinc-800 flex flex-col h-screen shrink-0 transition-all duration-300 max-lg:absolute max-lg:z-50 max-lg:-translate-x-full" data-open="true">
+    <div class="p-4 border-b border-zinc-800 flex items-center gap-3">
+      <div class="w-8 h-8 rounded-lg bg-shark-600 flex items-center justify-center text-white font-bold text-sm">S</div>
+      <span class="font-semibold text-lg tracking-tight">Shark Answer</span>
+    </div>
+    <button id="newSubmission" class="mx-3 mt-3 px-4 py-2.5 rounded-lg border border-zinc-700 text-sm hover:bg-zinc-800 transition flex items-center gap-2">
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+      New Paper
+    </button>
+    <div class="flex-1 overflow-y-auto mt-3 px-2" id="historyList">
+      <p class="px-2 py-8 text-xs text-zinc-500 text-center">No submissions yet</p>
+    </div>
+    <div class="p-3 border-t border-zinc-800 text-xs text-zinc-500 flex items-center justify-between">
+      <span id="totalCostDisplay">Session: $0.00</span>
+      <a href="/docs" target="_blank" class="hover:text-zinc-300 transition">API Docs</a>
+    </div>
+  </aside>
+
+  <!-- Sidebar toggle (mobile) -->
+  <button id="sidebarToggle" class="fixed top-3 left-3 z-40 lg:hidden p-2 rounded-lg bg-zinc-800 border border-zinc-700">
+    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
+  </button>
+
+  <!-- ===== MAIN AREA ===== -->
+  <main class="flex-1 flex flex-col h-screen overflow-hidden">
+
+    <!-- Top bar -->
+    <header class="shrink-0 px-6 py-3 border-b border-zinc-800 flex items-center justify-between bg-zinc-900/50 backdrop-blur">
+      <h1 class="text-sm font-medium text-zinc-400">A-Level CIE Exam Answer Generator</h1>
+      <div class="flex items-center gap-3">
+        <div id="exportBtns" class="hidden flex items-center gap-2">
+          <button onclick="exportPDF()" class="px-3 py-1.5 text-xs rounded-md bg-red-600/20 text-red-400 hover:bg-red-600/30 transition flex items-center gap-1.5">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+            PDF
+          </button>
+          <button onclick="exportDocx()" class="px-3 py-1.5 text-xs rounded-md bg-blue-600/20 text-blue-400 hover:bg-blue-600/30 transition flex items-center gap-1.5">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+            Word
+          </button>
+          <button onclick="openPreview()" class="px-3 py-1.5 text-xs rounded-md bg-zinc-700/50 text-zinc-300 hover:bg-zinc-700 transition flex items-center gap-1.5">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>
+            Preview
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <!-- Scrollable content area -->
+    <div class="flex-1 overflow-y-auto" id="mainContent">
+
+      <!-- Upload section -->
+      <div id="uploadSection" class="max-w-3xl mx-auto px-6 py-12">
+        <div class="text-center mb-8">
+          <div class="w-16 h-16 rounded-2xl bg-shark-600/20 flex items-center justify-center mx-auto mb-4">
+            <svg class="w-8 h-8 text-shark-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+          </div>
+          <h2 class="text-2xl font-semibold mb-1">Upload Exam Paper</h2>
+          <p class="text-zinc-500 text-sm">Drop photos of your exam paper to generate A/A* answers</p>
+        </div>
+
+        <!-- Drop zone -->
+        <div id="dropZone" class="relative border-2 border-dashed border-zinc-700 rounded-2xl p-10 text-center hover:border-shark-500 transition-colors cursor-pointer group">
+          <input type="file" id="fileInput" multiple accept="image/*" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer">
+          <svg class="w-10 h-10 mx-auto mb-3 text-zinc-600 group-hover:text-shark-400 transition" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/></svg>
+          <p class="text-zinc-400 text-sm mb-1">Drag &amp; drop exam paper photos here</p>
+          <p class="text-zinc-600 text-xs">or click to browse &middot; supports multiple pages</p>
+        </div>
+
+        <!-- File preview thumbnails -->
+        <div id="filePreviews" class="mt-4 flex gap-3 flex-wrap hidden"></div>
+
+        <!-- Options -->
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-6">
+          <div>
+            <label class="block text-xs text-zinc-500 mb-1.5">Subject</label>
+            <select id="subjectSelect" class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-shark-500 focus:border-transparent outline-none">
+              <option value="physics">Physics</option>
+              <option value="chemistry">Chemistry</option>
+              <option value="biology">Biology</option>
+              <option value="math">Math</option>
+              <option value="further_math">Further Math</option>
+              <option value="economics">Economics</option>
+              <option value="computer_science">Computer Science</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs text-zinc-500 mb-1.5">Language</label>
+            <select id="langSelect" class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-shark-500 focus:border-transparent outline-none">
+              <option value="en">English</option>
+              <option value="zh">中文</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs text-zinc-500 mb-1.5">Versions</label>
+            <select id="versionsSelect" class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-shark-500 focus:border-transparent outline-none">
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="3" selected>3</option>
+              <option value="4">4</option>
+              <option value="5">5</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs text-zinc-500 mb-1.5">Examiner Profile</label>
+            <select id="profileSelect" class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-shark-500 focus:border-transparent outline-none">
+              <option value="">Default</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Submit -->
+        <button id="submitBtn" disabled class="mt-6 w-full py-3 rounded-xl bg-shark-600 hover:bg-shark-500 disabled:bg-zinc-800 disabled:text-zinc-600 disabled:cursor-not-allowed text-white font-medium transition-all text-sm flex items-center justify-center gap-2">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+          Generate Answers
+        </button>
+      </div>
+
+      <!-- Progress section (hidden by default) -->
+      <div id="progressSection" class="max-w-3xl mx-auto px-6 py-12 hidden">
+        <div class="bg-zinc-900 rounded-2xl border border-zinc-800 p-8">
+          <div class="flex items-center gap-3 mb-6">
+            <div class="w-10 h-10 rounded-xl bg-shark-600/20 flex items-center justify-center">
+              <svg class="w-5 h-5 text-shark-400 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+            </div>
+            <div>
+              <h3 class="font-semibold">Processing Exam Paper</h3>
+              <p id="progressSubtext" class="text-xs text-zinc-500">Uploading images...</p>
+            </div>
+          </div>
+          <!-- Pipeline stages -->
+          <div class="space-y-3" id="pipelineStages">
+            <div class="stage" data-stage="upload">
+              <div class="flex items-center gap-3">
+                <div class="w-6 h-6 rounded-full border-2 border-zinc-700 flex items-center justify-center stage-icon">
+                  <div class="w-2 h-2 rounded-full bg-zinc-600"></div>
+                </div>
+                <span class="text-sm text-zinc-400">Uploading images</span>
+              </div>
+            </div>
+            <div class="stage" data-stage="extract">
+              <div class="flex items-center gap-3">
+                <div class="w-6 h-6 rounded-full border-2 border-zinc-700 flex items-center justify-center stage-icon">
+                  <div class="w-2 h-2 rounded-full bg-zinc-600"></div>
+                </div>
+                <span class="text-sm text-zinc-400">Extracting questions via AI vision</span>
+              </div>
+            </div>
+            <div class="stage" data-stage="solve">
+              <div class="flex items-center gap-3">
+                <div class="w-6 h-6 rounded-full border-2 border-zinc-700 flex items-center justify-center stage-icon">
+                  <div class="w-2 h-2 rounded-full bg-zinc-600"></div>
+                </div>
+                <span class="text-sm text-zinc-400">Models solving questions</span>
+              </div>
+            </div>
+            <div class="stage" data-stage="verify">
+              <div class="flex items-center gap-3">
+                <div class="w-6 h-6 rounded-full border-2 border-zinc-700 flex items-center justify-center stage-icon">
+                  <div class="w-2 h-2 rounded-full bg-zinc-600"></div>
+                </div>
+                <span class="text-sm text-zinc-400">Cross-checking &amp; verification</span>
+              </div>
+            </div>
+            <div class="stage" data-stage="finalize">
+              <div class="flex items-center gap-3">
+                <div class="w-6 h-6 rounded-full border-2 border-zinc-700 flex items-center justify-center stage-icon">
+                  <div class="w-2 h-2 rounded-full bg-zinc-600"></div>
+                </div>
+                <span class="text-sm text-zinc-400">Generating explanations &amp; finalizing</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Results section (hidden by default) -->
+      <div id="resultsSection" class="max-w-5xl mx-auto px-6 py-8 hidden">
+        <div id="resultsContainer"></div>
+      </div>
+
+    </div><!-- /mainContent -->
+  </main>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

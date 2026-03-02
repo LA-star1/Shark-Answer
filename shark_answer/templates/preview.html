@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Shark Answer — Print Preview</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+    onload="renderMathInElement(document.body, {delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false},{left:'\\\\(',right:'\\\\)',display:false},{left:'\\\\[',right:'\\\\]',display:true}],throwOnError:false});">
+  </script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; color: #1a1a2e; line-height: 1.6; padding: 40px 60px; max-width: 900px; margin: 0 auto; }
+    @media print {
+      body { padding: 20px; }
+      .no-print { display: none !important; }
+      .question-block { page-break-inside: avoid; }
+    }
+    h1 { font-size: 28px; font-weight: 700; margin-bottom: 4px; color: #1e3a8a; }
+    .meta { font-size: 12px; color: #6b7280; margin-bottom: 32px; padding-bottom: 16px; border-bottom: 2px solid #e5e7eb; }
+    .question-block { margin-bottom: 36px; }
+    .question-block h2 { font-size: 18px; font-weight: 600; color: #1e40af; margin-bottom: 8px; }
+    .question-text { font-size: 14px; color: #4b5563; margin-bottom: 16px; padding: 12px; background: #f9fafb; border-radius: 8px; border-left: 3px solid #3b82f6; }
+    .version { margin-bottom: 20px; padding: 16px; border: 1px solid #e5e7eb; border-radius: 10px; }
+    .version h3 { font-size: 14px; font-weight: 600; color: #374151; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+    .version h3 .badge { font-size: 10px; padding: 2px 6px; border-radius: 4px; font-weight: 500; }
+    .badge-v { background: #dbeafe; color: #1e40af; }
+    .badge-ok { background: #d1fae5; color: #065f46; }
+    .badge-m { background: #ede9fe; color: #5b21b6; }
+    .answer-text { font-size: 13px; white-space: pre-wrap; word-wrap: break-word; line-height: 1.8; }
+    .explanation { margin-top: 12px; padding: 12px; background: #f3f4f6; border-radius: 8px; font-size: 12px; line-height: 1.7; color: #4b5563; }
+    .explanation-title { font-weight: 600; font-size: 12px; margin-bottom: 4px; color: #374151; }
+    .print-bar { position: fixed; top: 0; left: 0; right: 0; background: #1e3a8a; color: white; padding: 10px 24px; display: flex; justify-content: space-between; align-items: center; z-index: 100; }
+    .print-bar button { background: white; color: #1e3a8a; border: none; padding: 6px 16px; border-radius: 6px; font-weight: 600; font-size: 13px; cursor: pointer; }
+    .print-bar button:hover { background: #dbeafe; }
+    body { padding-top: 70px; }
+  </style>
+</head>
+<body>
+  <div class="print-bar no-print">
+    <span>Shark Answer — Print Preview</span>
+    <div style="display:flex;gap:8px;">
+      <button onclick="window.print()">🖨 Print</button>
+      <button onclick="window.close()">Close</button>
+    </div>
+  </div>
+
+  {% set d = data.get('data', {}) %}
+  {% set results = d.get('results', []) %}
+  {% set cost = d.get('cost_summary', {}) %}
+  {% set subject_name = results[0].get('subject', 'Unknown') if results else 'Unknown' %}
+
+  <h1>Shark Answer — Exam Results</h1>
+  <div class="meta">
+    Subject: {{ subject_name | replace('_', ' ') | title }} &nbsp;|&nbsp;
+    Questions: {{ d.get('total_questions', 0) }} &nbsp;|&nbsp;
+    Cost: ${{ "%.4f" | format(cost.get('total_cost_usd', 0)) }} &nbsp;|&nbsp;
+    Generated: {{ data.get('timestamp', '') }}
+  </div>
+
+  {% for qr in results %}
+  <div class="question-block">
+    <h2>Question {{ qr.question_number }}</h2>
+    <div class="question-text">{{ qr.question_text }}</div>
+
+    {% for v in qr.get('versions', []) %}
+    <div class="version">
+      <h3>
+        Version {{ v.version_number }}: {{ v.get('approach_label', '') }}
+        <span class="badge badge-m">{{ v.provider }}</span>
+        {% if v.verified %}<span class="badge badge-ok">✓ Verified</span>{% endif %}
+      </h3>
+      <div class="answer-text">{{ v.answer_text }}</div>
+      {% if v.explanation_text %}
+      <div class="explanation">
+        <div class="explanation-title">Explanation</div>
+        {{ v.explanation_text }}
+      </div>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  {% endfor %}
+
+</body>
+</html>
