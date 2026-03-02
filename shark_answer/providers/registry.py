@@ -30,7 +30,7 @@ DEFAULT_MODELS: dict[ModelProvider, str] = {
     ModelProvider.O3PRO:    "o3-mini",          # TODO: revert to "o3-pro"
 
     # DeepSeek  — V3.2 (deepseek-chat = non-thinking; deepseek-reasoner = CoT/thinking)
-    ModelProvider.DEEPSEEK: "deepseek-chat",               # deepseek-chat → DeepSeek-V3.2
+    ModelProvider.DEEPSEEK: "deepseek-reasoner",            # deepseek-reasoner → DeepSeek-V3.2 CoT/thinking
 
     # Google Gemini  — 3.1 Pro
     ModelProvider.GEMINI:   "gemini-3.1-pro-preview",       # preview string confirmed via ListModels
