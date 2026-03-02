@@ -1,7 +1,13 @@
 """Pipeline C: Computer Science.
 
+Models (2026):
+  claude-opus-4.6  — primary + JUDGE (SWE-bench leader, best code reasoning)
+  minimax-m2.5     — primary (strong software engineering)
+  glm-5            — primary (top HumanEval score)
+  deepseek-v3.2    — primary (strong coder, cost-efficient)
+
 Flow:
-1. Primary: Claude + GPT-4o, Supplementary: DeepSeek
+1. All 4 primary models solve independently
 2. For programming questions: execute and test code to verify
 3. Format pseudocode to match CIE pseudocode conventions (Cambridge notation)
 4. Generate up to 5 versions using different algorithms/approaches
@@ -125,10 +131,9 @@ async def run_pipeline_c(
         f"{question.text}{lang_suffix}"
     )
 
-    # Step 1: Primary + supplementary models solve
+    # Step 1: All primary models solve (judge also included in primary list)
     primary = config.get_pipeline_models(Pipeline.CS, "primary")
-    supplementary = config.get_pipeline_models(Pipeline.CS, "supplementary")
-    all_models = primary + supplementary
+    all_models = primary
 
     if not all_models:
         result.errors.append("No models configured for Pipeline C")

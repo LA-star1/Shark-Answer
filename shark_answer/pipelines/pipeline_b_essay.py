@@ -1,20 +1,32 @@
 """Pipeline B: Essay Subjects (Economics, Biology essay questions).
 
+Models (2026) with FIXED argument angles:
+  claude-opus-4.6  → Orthodox/mainstream view  +  JUDGE (scores all drafts)
+  gpt-5.2-thinking → Critical/contrarian perspective
+  gemini-3.1-pro   → Case-study driven (real-world examples)
+  deepseek-v3.2    → Theoretical/academic framework
+  qwen3-max        → Comparative analysis (cross-country/cross-policy)
+  glm-5            → Policy-oriented perspective
+  kimi-k2.5        → Data/evidence-based empirical approach
+  minimax-m2.5     → Backup/reserve
+
 Flow:
-1. Angle generation: 5 models each brainstorm a DIFFERENT argument angle
-2. Full draft: Each model writes a complete answer from its assigned angle
-3. Quality gate: Judge scores drafts against CIE mark scheme criteria
-4. Anti-AI detection: Humanize each version with different writing personality
-5. Output: Up to 5 versions with genuinely different arguments
+1. Each assigned model brainstorms from its FIXED angle (no overlap)
+2. Each model writes a full draft in its angle voice
+3. Claude (judge) scores every draft against CIE mark scheme criteria
+4. Below-A drafts get one revision attempt
+5. Humanize each passing draft with a different writing personality
+6. Output: up to 7 versions with genuinely different arguments
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Optional
 
-from shark_answer.config import AppConfig, ModelProvider, Pipeline
+from shark_answer.config import AppConfig, ModelProvider, Pipeline, PIPELINE_CONFIG
 from shark_answer.knowledge_base.store import KnowledgeBase
 from shark_answer.modules.examiner_profile import ExaminerProfile
 from shark_answer.modules.explanation import build_explanation_prompt
@@ -25,23 +37,35 @@ from shark_answer.utils.image_extractor import ExtractedQuestion
 
 logger = logging.getLogger(__name__)
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Model → assigned argument angle  (mirrors PIPELINE_CONFIG["B_essay"]["angles"])
+# ──────────────────────────────────────────────────────────────────────────────
+_ESSAY_MODEL_ANGLES: dict[ModelProvider, str] = PIPELINE_CONFIG["B_essay"]["angles"]
+
+# Human-readable angle descriptions for display labels
+_ANGLE_DISPLAY: dict[str, str] = {
+    "orthodox/mainstream textbook view":            "Mainstream / Textbook",
+    "critical/contrarian perspective":              "Critical / Contrarian",
+    "case-study driven (real-world examples)":      "Case-Study Driven",
+    "theoretical/academic framework":               "Theoretical Framework",
+    "comparative analysis (cross-country/cross-policy)": "Comparative Analysis",
+    "policy-oriented perspective":                  "Policy-Oriented",
+    "data/evidence-based empirical approach":       "Data & Evidence",
+}
+
 ANGLE_SYSTEM = """You are a CIE A-Level {subject} essay specialist.
 
 Your task: brainstorm a UNIQUE argument angle for the question below.
-You are Model #{model_index} of 5. Each model must take a DIFFERENT perspective.
+You have been assigned the following perspective — you MUST argue from it:
 
-Model perspective assignments:
-- Model 1: Orthodox/mainstream textbook argument
-- Model 2: Counter-intuitive or contrarian position
-- Model 3: Real-world case study driven approach (specific country/company/event)
-- Model 4: Theoretical deep-dive with evaluation of assumptions
-- Model 5: Comparative/multi-perspective analysis
+  ASSIGNED ANGLE: {angle}
 
-You are Model #{model_index}. Stay in your lane — do NOT overlap with other angles.
+Do NOT overlap with, or drift towards, any other perspective. Stay strictly
+within your assigned viewpoint.
 
 Output format (JSON):
 {{
-  "angle_title": "Brief title of your argument angle",
+  "angle_title": "Brief title that captures your specific angle",
   "thesis": "Your main argument in 1-2 sentences",
   "key_points": ["Point 1", "Point 2", "Point 3"],
   "examples": ["Specific example 1", "Specific example 2"],
@@ -110,6 +134,10 @@ Personality 4: Debate-style. Presents strong thesis, anticipates objections, reb
     Uses "Critics might contend..." and "Nevertheless,..." — adversarial clarity.
 Personality 5: Reflective and nuanced. Emphasizes complexity and trade-offs.
     Uses "The reality is more nuanced..." and "While X is true, Y complicates..." — balanced.
+Personality 6: Data-forward. Opens with statistics, quantifies every claim.
+    Uses "Evidence suggests..." and "According to data from..." — empirical tone.
+Personality 7: Institutional/policy. Frames everything around real-world policy implications.
+    Uses "Policymakers must consider..." and "The regulatory context suggests..." — applied.
 
 You are Personality #{personality_num}. Rewrite the essay in this voice while:
 - Keeping ALL the substantive content, arguments, and examples
@@ -131,7 +159,7 @@ async def run_pipeline_b(
     knowledge_base: Optional[KnowledgeBase] = None,
     examiner_profile: Optional[ExaminerProfile] = None,
     language: str = "en",
-    max_versions: int = 5,
+    max_versions: int = 7,
 ) -> PipelineResult:
     """Run Pipeline B for an essay question."""
     result = PipelineResult(
@@ -152,55 +180,55 @@ async def run_pipeline_b(
 
     lang_suffix = "\n\nWrite your answer in Chinese (简体中文)." if language == "zh" else ""
 
-    brainstorm_models = config.get_pipeline_models(Pipeline.ESSAY, "brainstorm")
-    if not brainstorm_models:
+    # Build ordered list of (model, angle) for available configured models
+    all_angle_models = config.get_available_models(list(_ESSAY_MODEL_ANGLES.keys()))
+    if not all_angle_models:
+        # Fall back to any available brainstorm models
+        all_angle_models = config.get_pipeline_models(Pipeline.ESSAY, "brainstorm")
+    if not all_angle_models:
         result.errors.append("No brainstorm models configured for Pipeline B")
         return result
 
-    # Limit to max_versions models
-    brainstorm_models = brainstorm_models[:max_versions]
+    # Limit to max_versions writers
+    angle_models = all_angle_models[:max_versions]
+    word_target = max(300, question.marks * 40)
+
     question_prompt = (
         f"Question [{question.marks} marks]:\n{question.text}\n\n"
         f"Brainstorm your unique argument angle.{lang_suffix}"
     )
 
-    # ===== Step 1: Angle Generation (parallel) =====
+    # ===== Step 1: Angle Generation (parallel, each model gets its fixed angle) =====
     logger.info("Pipeline B: Generating %d angles for Q%s",
-                len(brainstorm_models), question.number)
+                len(angle_models), question.number)
 
-    import asyncio
-
-    async def _get_angle(model: ModelProvider, index: int):
+    async def _get_angle(model: ModelProvider) -> tuple[ModelProvider, str | None]:
         inst = registry.get(model)
         if not inst:
             return model, None
-        sys = ANGLE_SYSTEM.format(
-            subject=subject, model_index=index + 1,
-        )
+        assigned_angle = _ESSAY_MODEL_ANGLES.get(model, "balanced multi-perspective analysis")
+        sys = ANGLE_SYSTEM.format(subject=subject, angle=assigned_angle)
         resp = await inst.generate(
             prompt=question_prompt, system=sys,
             temperature=0.7, max_tokens=1500,
         )
         cost_tracker.record(resp, subject, "B-angle")
-        return model, resp
+        return model, (resp.content if resp.success else None)
 
-    angle_tasks = [_get_angle(m, i) for i, m in enumerate(brainstorm_models)]
-    angle_results = await asyncio.gather(*angle_tasks)
+    angle_tasks = [_get_angle(m) for m in angle_models]
+    angle_results: list[tuple[ModelProvider, str | None]] = await asyncio.gather(*angle_tasks)
 
-    angles: list[tuple[ModelProvider, str]] = []
-    for model, resp in angle_results:
-        if resp and resp.success:
-            angles.append((model, resp.content))
-
+    angles: list[tuple[ModelProvider, str]] = [
+        (m, content) for m, content in angle_results if content is not None
+    ]
     if not angles:
         result.errors.append("All angle generation calls failed")
         return result
 
     # ===== Step 2: Full Draft (parallel) =====
     logger.info("Pipeline B: Writing %d drafts", len(angles))
-    word_target = max(300, question.marks * 40)  # rough heuristic
 
-    async def _write_draft(model: ModelProvider, angle_json: str, idx: int):
+    async def _write_draft(model: ModelProvider, angle_json: str) -> tuple[ModelProvider, str | None]:
         inst = registry.get(model)
         if not inst:
             return model, None
@@ -217,26 +245,28 @@ async def run_pipeline_b(
             temperature=0.6, max_tokens=6000,
         )
         cost_tracker.record(resp, subject, "B-draft")
-        return model, resp
+        return model, (resp.content if resp.success else None)
 
-    draft_tasks = [_write_draft(m, a, i) for i, (m, a) in enumerate(angles)]
-    draft_results = await asyncio.gather(*draft_tasks)
+    draft_tasks = [_write_draft(m, a) for m, a in angles]
+    draft_results: list[tuple[ModelProvider, str | None]] = await asyncio.gather(*draft_tasks)
 
-    drafts: list[tuple[ModelProvider, str, str]] = []  # (model, angle, draft)
-    for (model_a, angle), (model_d, resp) in zip(angles, draft_results):
-        if resp and resp.success:
-            drafts.append((model_d, angle, resp.content))
-
+    # (model, angle_json, draft_text)
+    drafts: list[tuple[ModelProvider, str, str]] = [
+        (m, angles[i][1], draft)
+        for i, (m, draft) in enumerate(draft_results)
+        if draft is not None
+    ]
     if not drafts:
         result.errors.append("All draft writing calls failed")
         return result
 
-    # ===== Step 3: Quality Gate =====
+    # ===== Step 3: Quality Gate (Claude judge scores each draft) =====
     logger.info("Pipeline B: Judging %d drafts", len(drafts))
-    judge_models = config.get_pipeline_models(Pipeline.ESSAY, "judge")
-    judge_model = judge_models[0] if judge_models else brainstorm_models[0]
+    judge_provider = PIPELINE_CONFIG["B_essay"]["judge"]
+    judge_models = config.get_available_models([judge_provider])
+    judge_model = judge_models[0] if judge_models else (angle_models[0])
 
-    passing_drafts: list[tuple[ModelProvider, str, str, float]] = []
+    passing_drafts: list[tuple[ModelProvider, str, str, float]] = []  # model, angle, text, score
 
     for model, angle, draft in drafts:
         judge_inst = registry.get(judge_model)
@@ -252,16 +282,15 @@ async def run_pipeline_b(
         )
         cost_tracker.record(judge_resp, subject, "B-judge")
 
-        score = 75.0  # default
+        score = 75.0
         if judge_resp.success:
             score = _extract_score(judge_resp.content)
 
-        if score >= 70:  # A threshold
+        if score >= 70:  # A-grade threshold
             passing_drafts.append((model, angle, draft, score))
         else:
             logger.info("Draft from %s scored %.1f (below A), requesting revision",
                         model.value, score)
-            # Revision attempt
             revision_instructions = _extract_revision_instructions(judge_resp.content)
             inst = registry.get(model)
             if inst:
@@ -285,10 +314,10 @@ async def run_pipeline_b(
                 if rev_resp.success:
                     passing_drafts.append((model, angle, rev_resp.content, score + 5))
 
-    # ===== Step 4: Humanize with different writing personalities =====
+    # ===== Step 4: Humanize with model-matched writing personalities =====
     logger.info("Pipeline B: Humanizing %d drafts", len(passing_drafts))
 
-    async def _humanize(model: ModelProvider, draft: str, personality: int):
+    async def _humanize(model: ModelProvider, draft: str, personality: int) -> str:
         inst = registry.get(model)
         if not inst:
             return draft
@@ -308,19 +337,19 @@ async def run_pipeline_b(
         _humanize(model, draft, i + 1)
         for i, (model, _, draft, _) in enumerate(passing_drafts[:max_versions])
     ]
-    humanized = await asyncio.gather(*humanize_tasks)
+    humanized: list[str] = await asyncio.gather(*humanize_tasks)
 
     # ===== Step 5: Build versions with explanations =====
+    explain_provider = judge_model  # Claude judges and also explains
+
     for i, ((model, angle, _, score), final_text) in enumerate(
         zip(passing_drafts[:max_versions], humanized)
     ):
-        # Generate explanation
         explain_prompt = build_explanation_prompt(
             Pipeline.ESSAY, question.text, final_text, language
         )
-        explain_model = judge_models[0] if judge_models else brainstorm_models[0]
         explain_resp = await registry.call_models_parallel(
-            providers=[explain_model],
+            providers=[explain_provider],
             prompt=explain_prompt,
             system="You are a CIE A-Level essay coach creating study explanations.",
             temperature=0.4, max_tokens=3000,
@@ -328,11 +357,15 @@ async def run_pipeline_b(
         cost_tracker.record_batch(explain_resp, subject, "B-explain")
         explanation = explain_resp[0].content if explain_resp[0].success else ""
 
+        # Derive display label from angle or model
+        assigned_angle = _ESSAY_MODEL_ANGLES.get(model, "")
+        label = _ANGLE_DISPLAY.get(assigned_angle, None) or _extract_angle_title(angle)
+
         version = AnswerVersion(
             version_number=i + 1,
             answer_text=final_text,
             explanation_text=explanation,
-            approach_label=_extract_angle_title(angle),
+            approach_label=label,
             provider=model.value,
             quality_score=score,
             language=language,
@@ -342,10 +375,13 @@ async def run_pipeline_b(
     return result
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
 def _extract_score(judge_output: str) -> float:
     """Extract total score from judge JSON output."""
     try:
-        # Find JSON in output
         start = judge_output.find("{")
         end = judge_output.rfind("}") + 1
         if start >= 0 and end > start:
@@ -363,7 +399,10 @@ def _extract_revision_instructions(judge_output: str) -> str:
         end = judge_output.rfind("}") + 1
         if start >= 0 and end > start:
             data = json.loads(judge_output[start:end])
-            return data.get("revision_instructions", "Improve evaluation depth and add specific examples.")
+            return data.get(
+                "revision_instructions",
+                "Improve evaluation depth and add specific examples.",
+            )
     except (json.JSONDecodeError, ValueError):
         pass
     return "Improve evaluation depth and add specific examples."

@@ -48,49 +48,107 @@ SUBJECT_PIPELINE_MAP: dict[Subject, Pipeline] = {
 
 
 class ModelProvider(str, Enum):
-    CLAUDE = "claude"
-    GPT4O = "gpt4o"
-    DEEPSEEK = "deepseek"
-    GEMINI = "gemini"
-    QWEN = "qwen"
-    GROK = "grok"
-    MINIMAX = "minimax"
-    KIMI = "kimi"
+    CLAUDE   = "claude"    # Anthropic  — claude-opus-4-6-20250901
+    GPT4O    = "gpt4o"     # OpenAI     — gpt-5.2-thinking  (essays / general)
+    O3PRO    = "o3pro"     # OpenAI     — o3-pro            (science / math)
+    DEEPSEEK = "deepseek"  # DeepSeek   — deepseek-v3.2-speciale
+    GEMINI   = "gemini"    # Google     — gemini-3.1-pro
+    QWEN     = "qwen"      # Alibaba    — qwen3-max
+    GROK     = "grok"      # xAI        — grok-2-vision-1212
+    MINIMAX  = "minimax"   # MiniMax    — minimax-m2.5
+    KIMI     = "kimi"      # Moonshot   — kimi-k2.5
+    GLM      = "glm"       # Zhipu AI   — glm-5
 
 
-# Model tier assignments per pipeline — easy to reconfigure
-PIPELINE_MODEL_CONFIG: dict[Pipeline, dict[str, list[ModelProvider]]] = {
-    Pipeline.SCIENCE_MATH: {
-        "primary": [ModelProvider.CLAUDE, ModelProvider.GPT4O, ModelProvider.DEEPSEEK],
-        "judge": [ModelProvider.CLAUDE],
-    },
-    Pipeline.ESSAY: {
-        "brainstorm": [
-            ModelProvider.CLAUDE, ModelProvider.GPT4O, ModelProvider.GEMINI,
-            ModelProvider.DEEPSEEK, ModelProvider.QWEN,
+# ──────────────────────────────────────────────────────────────────────────────
+# PIPELINE_CONFIG — single source of truth for which models run in each pipeline
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# Pipeline A (Science & Math):  5 solvers  +  Claude as judge
+# Pipeline B (Essay):           7 angle-writers + Claude as judge; MiniMax backup
+# Pipeline C (Computer Science):4 solvers  +  Claude as judge
+#
+PIPELINE_CONFIG: dict[str, dict] = {
+    "A_science": {
+        # o3-pro: strongest math reasoning (top AIME scores)
+        # deepseek: strong STEM competitor (IMO/IOI-level)
+        # gemini: top GPQA science benchmark
+        # claude: solver + dispute judge
+        # glm: strong all-rounder supplement
+        "solvers": [
+            ModelProvider.O3PRO,
+            ModelProvider.DEEPSEEK,
+            ModelProvider.GEMINI,
+            ModelProvider.CLAUDE,
+            ModelProvider.GLM,
         ],
-        "judge": [ModelProvider.CLAUDE],
+        "judge": ModelProvider.CLAUDE,
     },
-    Pipeline.CS: {
-        "primary": [ModelProvider.CLAUDE, ModelProvider.GPT4O],
-        "supplementary": [ModelProvider.DEEPSEEK],
-        "judge": [ModelProvider.CLAUDE],
+    "B_essay": {
+        # Each model is assigned a FIXED argument angle to prevent generic outputs.
+        # Claude also acts as the scoring judge for all drafts.
+        "angles": {
+            ModelProvider.CLAUDE:   "orthodox/mainstream textbook view",
+            ModelProvider.GPT4O:    "critical/contrarian perspective",
+            ModelProvider.GEMINI:   "case-study driven (real-world examples)",
+            ModelProvider.DEEPSEEK: "theoretical/academic framework",
+            ModelProvider.QWEN:     "comparative analysis (cross-country/cross-policy)",
+            ModelProvider.GLM:      "policy-oriented perspective",
+            ModelProvider.KIMI:     "data/evidence-based empirical approach",
+        },
+        "judge": ModelProvider.CLAUDE,
+        "backup": [ModelProvider.MINIMAX],
     },
-    Pipeline.PRACTICAL: {
-        "primary": [ModelProvider.CLAUDE, ModelProvider.GPT4O],
+    "C_cs": {
+        # claude: primary + judge (SWE-bench leader)
+        # minimax: strong software engineering
+        # glm: high HumanEval score
+        # deepseek: strong coder, low cost
+        "solvers": [
+            ModelProvider.CLAUDE,
+            ModelProvider.MINIMAX,
+            ModelProvider.GLM,
+            ModelProvider.DEEPSEEK,
+        ],
+        "judge": ModelProvider.CLAUDE,
     },
 }
 
-# Cost per 1M tokens (input/output) in USD — approximate, update as needed
+# ──────────────────────────────────────────────────────────────────────────────
+# PIPELINE_MODEL_CONFIG — legacy format consumed by config.get_pipeline_models()
+# Derived automatically from PIPELINE_CONFIG so there is only ONE place to edit.
+# ──────────────────────────────────────────────────────────────────────────────
+PIPELINE_MODEL_CONFIG: dict[Pipeline, dict[str, list[ModelProvider]]] = {
+    Pipeline.SCIENCE_MATH: {
+        "primary": PIPELINE_CONFIG["A_science"]["solvers"],
+        "judge":   [PIPELINE_CONFIG["A_science"]["judge"]],
+    },
+    Pipeline.ESSAY: {
+        "brainstorm": list(PIPELINE_CONFIG["B_essay"]["angles"].keys()),
+        "judge":      [PIPELINE_CONFIG["B_essay"]["judge"]],
+        "backup":     PIPELINE_CONFIG["B_essay"]["backup"],
+    },
+    Pipeline.CS: {
+        "primary": PIPELINE_CONFIG["C_cs"]["solvers"],
+        "judge":   [PIPELINE_CONFIG["C_cs"]["judge"]],
+    },
+    Pipeline.PRACTICAL: {
+        "primary": [ModelProvider.CLAUDE, ModelProvider.O3PRO],
+    },
+}
+
+# Cost per 1M tokens (input/output) in USD — approximate, update as pricing changes
 MODEL_COST_PER_M_TOKENS: dict[ModelProvider, dict[str, float]] = {
-    ModelProvider.CLAUDE:   {"input": 3.00, "output": 15.00},
-    ModelProvider.GPT4O:    {"input": 2.50, "output": 10.00},
-    ModelProvider.DEEPSEEK: {"input": 0.27, "output": 1.10},
-    ModelProvider.GEMINI:   {"input": 1.25, "output": 5.00},
-    ModelProvider.QWEN:     {"input": 0.50, "output": 2.00},
-    ModelProvider.GROK:     {"input": 5.00, "output": 15.00},
-    ModelProvider.MINIMAX:  {"input": 0.50, "output": 1.50},
-    ModelProvider.KIMI:     {"input": 1.00, "output": 3.00},
+    ModelProvider.CLAUDE:   {"input": 15.00, "output": 75.00},   # Opus 4.6 pricing estimate
+    ModelProvider.GPT4O:    {"input": 10.00, "output": 30.00},   # GPT-5.2 pricing estimate
+    ModelProvider.O3PRO:    {"input": 20.00, "output": 80.00},   # o3-pro pricing estimate
+    ModelProvider.DEEPSEEK: {"input":  0.27, "output":  1.10},
+    ModelProvider.GEMINI:   {"input":  1.25, "output":  5.00},
+    ModelProvider.QWEN:     {"input":  0.50, "output":  2.00},
+    ModelProvider.GROK:     {"input":  5.00, "output": 15.00},
+    ModelProvider.MINIMAX:  {"input":  0.50, "output":  1.50},
+    ModelProvider.KIMI:     {"input":  1.00, "output":  3.00},
+    ModelProvider.GLM:      {"input":  0.70, "output":  2.80},   # GLM-5 pricing estimate
 }
 
 
@@ -128,19 +186,22 @@ class AppConfig:
             upload_dir=Path(os.getenv("UPLOAD_DIR", "data/uploads")),
         )
 
-        # Load model configurations
-        model_env_map: dict[ModelProvider, tuple[str, Optional[str], Optional[str]]] = {
-            ModelProvider.CLAUDE:   ("ANTHROPIC_API_KEY", None, None),
-            ModelProvider.GPT4O:    ("OPENAI_API_KEY", None, None),
-            ModelProvider.DEEPSEEK: ("DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", None),
-            ModelProvider.GEMINI:   ("GOOGLE_GEMINI_API_KEY", None, None),
-            ModelProvider.QWEN:     ("QWEN_API_KEY", "QWEN_BASE_URL", None),
-            ModelProvider.GROK:     ("GROK_API_KEY", "GROK_BASE_URL", None),
-            ModelProvider.MINIMAX:  ("MINIMAX_API_KEY", "MINIMAX_BASE_URL", None),
-            ModelProvider.KIMI:     ("KIMI_API_KEY", "KIMI_BASE_URL", None),
+        # Maps ModelProvider → (api_key_env, base_url_env)
+        # O3PRO reuses the same OPENAI_API_KEY — two instances, different models.
+        model_env_map: dict[ModelProvider, tuple[str, Optional[str]]] = {
+            ModelProvider.CLAUDE:   ("ANTHROPIC_API_KEY",   None),
+            ModelProvider.GPT4O:    ("OPENAI_API_KEY",      None),
+            ModelProvider.O3PRO:    ("OPENAI_API_KEY",      None),   # same key, diff model
+            ModelProvider.DEEPSEEK: ("DEEPSEEK_API_KEY",    "DEEPSEEK_BASE_URL"),
+            ModelProvider.GEMINI:   ("GOOGLE_GEMINI_API_KEY", None),
+            ModelProvider.QWEN:     ("QWEN_API_KEY",        "QWEN_BASE_URL"),
+            ModelProvider.GROK:     ("GROK_API_KEY",        "GROK_BASE_URL"),
+            ModelProvider.MINIMAX:  ("MINIMAX_API_KEY",     "MINIMAX_BASE_URL"),
+            ModelProvider.KIMI:     ("KIMI_API_KEY",        "KIMI_BASE_URL"),
+            ModelProvider.GLM:      ("GLM_API_KEY",         "GLM_BASE_URL"),
         }
 
-        for provider, (key_env, url_env, _) in model_env_map.items():
+        for provider, (key_env, url_env) in model_env_map.items():
             api_key = os.getenv(key_env, "")
             if api_key:
                 base_url = os.getenv(url_env) if url_env else None

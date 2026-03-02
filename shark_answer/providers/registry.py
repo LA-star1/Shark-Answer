@@ -11,25 +11,49 @@ from shark_answer.providers.base import BaseProvider, ModelResponse
 
 logger = logging.getLogger(__name__)
 
-# Default model names per provider
+# ──────────────────────────────────────────────────────────────────────────────
+# Default model names per provider  (2026 flagship models)
+# TODO: verify exact model strings against each provider's current API docs
+#       before deploying to production.
+# ──────────────────────────────────────────────────────────────────────────────
 DEFAULT_MODELS: dict[ModelProvider, str] = {
-    ModelProvider.CLAUDE:   "claude-sonnet-4-20250514",
-    ModelProvider.GPT4O:    "gpt-4o",
-    ModelProvider.DEEPSEEK: "deepseek-chat",
-    ModelProvider.GEMINI:   "gemini-2.0-flash",
-    ModelProvider.QWEN:     "qwen-plus",
+    # Anthropic  — Opus 4.6  (strongest reasoning + vision)
+    ModelProvider.CLAUDE:   "claude-opus-4-6-20250901",    # TODO: verify date suffix
+
+    # OpenAI  — two separate instances from the same API key
+    ModelProvider.GPT4O:    "gpt-5.2-thinking",            # TODO: verify model string
+    ModelProvider.O3PRO:    "o3-pro",                      # confirmed real model
+
+    # DeepSeek  — V3.2 Speciale
+    ModelProvider.DEEPSEEK: "deepseek-v3.2-speciale",      # TODO: verify spelling/string
+
+    # Google Gemini  — 3.1 Pro
+    ModelProvider.GEMINI:   "gemini-3.1-pro",              # TODO: verify release
+
+    # Alibaba Qwen  — Qwen3-Max
+    ModelProvider.QWEN:     "qwen3-max",                   # TODO: verify availability
+
+    # xAI Grok  — vision-capable variant
     ModelProvider.GROK:     "grok-2-vision-1212",
-    ModelProvider.MINIMAX:  "MiniMax-Text-01",
-    ModelProvider.KIMI:     "moonshot-v1-128k",
+
+    # MiniMax  — M2.5
+    ModelProvider.MINIMAX:  "minimax-m2.5",                # TODO: verify model string
+
+    # Moonshot Kimi  — K2.5
+    ModelProvider.KIMI:     "kimi-k2.5",                   # TODO: verify model string
+
+    # Zhipu AI  — GLM-5
+    ModelProvider.GLM:      "glm-5",                       # TODO: verify release
 }
 
-# Default base URLs
+# Default base URLs for providers that don't use the canonical OpenAI endpoint
 DEFAULT_BASE_URLS: dict[ModelProvider, str] = {
     ModelProvider.DEEPSEEK: "https://api.deepseek.com",
     ModelProvider.QWEN:     "https://dashscope.aliyuncs.com/compatible-mode/v1",
     ModelProvider.GROK:     "https://api.x.ai/v1",
     ModelProvider.MINIMAX:  "https://api.minimax.chat/v1",
     ModelProvider.KIMI:     "https://api.moonshot.cn/v1",
+    ModelProvider.GLM:      "https://open.bigmodel.cn/api/paas/v4",
 }
 
 
@@ -59,20 +83,22 @@ class ProviderRegistry:
         if provider == ModelProvider.CLAUDE:
             from shark_answer.providers.claude_provider import ClaudeProvider
             instance = ClaudeProvider(api_key=api_key, model_name=model_name)
-        elif provider == ModelProvider.GPT4O:
+
+        elif provider in {ModelProvider.GPT4O, ModelProvider.O3PRO}:
+            # Both use the OpenAI provider; differ only in model name.
             from shark_answer.providers.openai_provider import OpenAIProvider
             instance = OpenAIProvider(api_key=api_key, model_name=model_name)
+
         elif provider == ModelProvider.GEMINI:
             from shark_answer.providers.gemini_provider import GeminiProvider
             instance = GeminiProvider(api_key=api_key, model_name=model_name)
+
         else:
-            # DeepSeek, Qwen, Grok, MiniMax, Kimi — all OpenAI-compatible
+            # DeepSeek, Qwen, Grok, MiniMax, Kimi, GLM — all OpenAI-compatible REST
             from shark_answer.providers.openai_compat_provider import OpenAICompatProvider
-            # Only Grok supports image_url vision format among compat providers.
-            # DeepSeek-chat and Qwen-plus do NOT support image inputs via this API.
-            vision_support = provider in {
-                ModelProvider.GROK,
-            }
+            # Only Grok supports the image_url vision format among compat providers.
+            # DeepSeek-chat, Qwen-plus, GLM text models do NOT support image inputs.
+            vision_support = provider in {ModelProvider.GROK}
             instance = OpenAICompatProvider(
                 api_key=api_key,
                 base_url=base_url,

@@ -39,6 +39,52 @@ class TestConfig:
         for provider in ModelProvider:
             assert provider in MODEL_COST_PER_M_TOKENS, f"Missing cost for {provider.value}"
 
+    def test_pipeline_config_structure(self):
+        from shark_answer.config import PIPELINE_CONFIG, ModelProvider
+        # Pipeline A
+        assert "A_science" in PIPELINE_CONFIG
+        assert ModelProvider.O3PRO in PIPELINE_CONFIG["A_science"]["solvers"]
+        assert ModelProvider.GLM in PIPELINE_CONFIG["A_science"]["solvers"]
+        assert PIPELINE_CONFIG["A_science"]["judge"] == ModelProvider.CLAUDE
+        # Pipeline B
+        assert "B_essay" in PIPELINE_CONFIG
+        angles = PIPELINE_CONFIG["B_essay"]["angles"]
+        assert ModelProvider.CLAUDE in angles
+        assert ModelProvider.GPT4O in angles
+        assert ModelProvider.GLM in angles
+        assert ModelProvider.KIMI in angles
+        # all 7 angle models present
+        assert len(angles) == 7
+        # Pipeline C
+        assert "C_cs" in PIPELINE_CONFIG
+        assert ModelProvider.MINIMAX in PIPELINE_CONFIG["C_cs"]["solvers"]
+        assert ModelProvider.GLM in PIPELINE_CONFIG["C_cs"]["solvers"]
+
+    def test_o3pro_uses_openai_key(self):
+        """O3PRO and GPT4O share the same OPENAI_API_KEY env var."""
+        from shark_answer.config import AppConfig, ModelProvider
+        import os
+        os.environ.setdefault("OPENAI_API_KEY", "sk-test-key")
+        config = AppConfig.from_env()
+        if ModelProvider.O3PRO in config.models:
+            o3 = config.models[ModelProvider.O3PRO]
+            gpt = config.models.get(ModelProvider.GPT4O)
+            if gpt:
+                assert o3.api_key == gpt.api_key, "O3PRO and GPT4O must share OPENAI_API_KEY"
+
+    def test_glm_and_o3pro_in_model_provider_enum(self):
+        from shark_answer.config import ModelProvider
+        assert ModelProvider.GLM == "glm"
+        assert ModelProvider.O3PRO == "o3pro"
+
+    def test_registry_knows_glm_and_o3pro_models(self):
+        from shark_answer.providers.registry import DEFAULT_MODELS
+        from shark_answer.config import ModelProvider
+        assert ModelProvider.GLM in DEFAULT_MODELS
+        assert ModelProvider.O3PRO in DEFAULT_MODELS
+        assert DEFAULT_MODELS[ModelProvider.O3PRO] == "o3-pro"
+        assert DEFAULT_MODELS[ModelProvider.GLM] == "glm-5"
+
 
 class TestCostTracker:
     def test_record_and_summary(self):

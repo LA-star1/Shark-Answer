@@ -1,9 +1,16 @@
 """Pipeline A: Science & Math (Physics, Chemistry, Biology, Math, Further Math).
 
+Models (2026):
+  o3-pro         — primary, strongest math reasoning
+  deepseek-v3.2  — primary, IMO/IOI-level STEM
+  gemini-3.1-pro — primary, top GPQA science score
+  claude-opus-4.6— primary + JUDGE (arbitrates disputes)
+  glm-5          — supplementary, strong all-rounder
+
 Flow:
-1. 3 primary models solve each question independently
-2. For calculation questions: auto-verify using Python (sympy for symbolic, numerical checks)
-3. If models disagree: flag, run focused debate round between disagreeing models, re-verify
+1. Up to 5 primary models solve each question independently
+2. For calculation questions: auto-verify using Python (sympy / numerical checks)
+3. If models disagree: flag, run focused debate → Claude judges final answer
 4. If all agree and computation confirms: skip debate (save API calls)
 5. Generate up to 5 answer versions with different solving methods
 6. Each version includes detailed explanation
