@@ -3,7 +3,7 @@
 Models (2026) with FIXED argument angles:
   claude-opus-4.6  → Orthodox/mainstream view  +  JUDGE (scores all drafts)
   gpt-5.2-thinking → Critical/contrarian perspective
-  gemini-3.1-pro   → Case-study driven (real-world examples)
+  gemini-3.1-pro-preview → Case-study driven (real-world examples)
   deepseek-v3.2    → Theoretical/academic framework
   qwen3-max        → Comparative analysis (cross-country/cross-policy)
   glm-5            → Policy-oriented perspective

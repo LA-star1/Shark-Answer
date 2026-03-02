@@ -1,9 +1,9 @@
 """Pipeline A: Science & Math (Physics, Chemistry, Biology, Math, Further Math).
 
 Models (2026):
-  o3-pro         — primary, strongest math reasoning
+  o3-mini        — primary, strong math reasoning (temp; revert to o3-pro after org verify)
   deepseek-v3.2  — primary, IMO/IOI-level STEM
-  gemini-3.1-pro — primary, top GPQA science score
+  gemini-3.1-pro-preview — primary, top GPQA science score
   claude-opus-4.6— primary + JUDGE (arbitrates disputes)
   glm-5          — supplementary, strong all-rounder
 

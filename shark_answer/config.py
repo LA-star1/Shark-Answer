@@ -50,9 +50,9 @@ SUBJECT_PIPELINE_MAP: dict[Subject, Pipeline] = {
 class ModelProvider(str, Enum):
     CLAUDE   = "claude"    # Anthropic  — claude-opus-4-6-20250901
     GPT4O    = "gpt4o"     # OpenAI     — gpt-5.2-thinking  (essays / general)
-    O3PRO    = "o3pro"     # OpenAI     — o3-pro            (science / math)
+    O3PRO    = "o3pro"     # OpenAI     — o3-mini (temp) / o3-pro (after org verify)
     DEEPSEEK = "deepseek"  # DeepSeek   — deepseek-v3.2-speciale
-    GEMINI   = "gemini"    # Google     — gemini-3.1-pro
+    GEMINI   = "gemini"    # Google     — gemini-3.1-pro-preview
     QWEN     = "qwen"      # Alibaba    — qwen3-max
     GROK     = "grok"      # xAI        — grok-2-vision-1212
     MINIMAX  = "minimax"   # MiniMax    — minimax-m2.5
@@ -70,9 +70,9 @@ class ModelProvider(str, Enum):
 #
 PIPELINE_CONFIG: dict[str, dict] = {
     "A_science": {
-        # o3-pro: strongest math reasoning (top AIME scores)
+        # o3-mini (temp / o3-pro after org verify): strong math reasoning
         # deepseek: strong STEM competitor (IMO/IOI-level)
-        # gemini: top GPQA science benchmark
+        # gemini-3.1-pro-preview: top GPQA science benchmark
         # claude: solver + dispute judge
         # glm: strong all-rounder supplement
         "solvers": [

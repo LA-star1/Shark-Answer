@@ -82,7 +82,7 @@ class TestConfig:
         from shark_answer.config import ModelProvider
         assert ModelProvider.GLM in DEFAULT_MODELS
         assert ModelProvider.O3PRO in DEFAULT_MODELS
-        assert DEFAULT_MODELS[ModelProvider.O3PRO] == "o3-pro"
+        assert DEFAULT_MODELS[ModelProvider.O3PRO] == "o3-mini"   # temp fallback; revert to "o3-pro" after org verify
         assert DEFAULT_MODELS[ModelProvider.GLM] == "glm-5"
 
 

@@ -9,6 +9,17 @@ import openai
 from shark_answer.providers.base import BaseProvider, ModelResponse, TokenUsage
 
 
+def _is_o_series(model_name: str) -> bool:
+    """Return True for OpenAI o1/o3 reasoning models.
+
+    These models require ``max_completion_tokens`` instead of ``max_tokens``
+    and do not support a custom ``temperature`` (must be omitted / 1.0).
+    Covers: o1, o1-mini, o1-pro, o3, o3-mini, o3-pro and any future o-series.
+    """
+    import re
+    return bool(re.match(r"o[13]", model_name))
+
+
 class OpenAIProvider(BaseProvider):
     provider_name = "gpt4o"
     default_model = "gpt-4o"
@@ -33,12 +44,20 @@ class OpenAIProvider(BaseProvider):
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
 
-        resp = await self.client.chat.completions.create(
-            model=self.model_name,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+        # o1/o3 reasoning models: no temperature, different token param name.
+        if _is_o_series(self.model_name):
+            resp = await self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                max_completion_tokens=max_tokens,
+            )
+        else:
+            resp = await self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
         choice = resp.choices[0]
         usage = resp.usage
         return ModelResponse(
@@ -81,12 +100,19 @@ class OpenAIProvider(BaseProvider):
             ],
         })
 
-        resp = await self.client.chat.completions.create(
-            model=self.model_name,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+        if _is_o_series(self.model_name):
+            resp = await self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                max_completion_tokens=max_tokens,
+            )
+        else:
+            resp = await self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
         choice = resp.choices[0]
         usage = resp.usage
         return ModelResponse(
