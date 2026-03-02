@@ -213,14 +213,17 @@ def _parse_extraction_response(content: str) -> list[ExtractedQuestion]:
     for item in data:
         if not isinstance(item, dict):
             continue
+        # Use `or` fallbacks to guard against None values returned by some models
+        raw_marks = item.get("marks")
+        raw_topic = item.get("topic_hints")
         questions.append(ExtractedQuestion(
-            number=str(item.get("number", "")),
-            text=str(item.get("text", "")),
-            marks=int(item.get("marks", 0)),
-            has_diagram=bool(item.get("has_diagram", False)),
-            diagram_description=str(item.get("diagram_description", "")),
-            question_type=str(item.get("question_type", "calculation")),
-            topic_hints=list(item.get("topic_hints", [])),
+            number=str(item.get("number") or ""),
+            text=str(item.get("text") or ""),
+            marks=int(raw_marks) if raw_marks is not None else 0,
+            has_diagram=bool(item.get("has_diagram") or False),
+            diagram_description=str(item.get("diagram_description") or ""),
+            question_type=str(item.get("question_type") or "calculation"),
+            topic_hints=list(raw_topic) if isinstance(raw_topic, list) else [],
         ))
 
     return questions
