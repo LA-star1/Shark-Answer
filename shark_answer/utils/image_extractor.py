@@ -41,13 +41,13 @@ EXTRACTION_PROMPT = """Extract ALL questions from this exam paper image.
 Return valid JSON only. Be extremely precise with formulas, numbers, and units.
 If the image is unclear in parts, note it with [UNCLEAR: description]."""
 
-# Vision-capable providers tried in priority order for extraction
+# Vision-capable providers tried in priority order for extraction.
+# NOTE: DeepSeek-chat and Qwen-plus do NOT support image inputs — excluded.
+# Grok uses grok-2-vision-1212 which does support images.
 _VISION_PROVIDER_PRIORITY = [
     ModelProvider.CLAUDE,
     ModelProvider.GPT4O,
     ModelProvider.GEMINI,
-    ModelProvider.DEEPSEEK,
-    ModelProvider.QWEN,
     ModelProvider.GROK,
 ]
 

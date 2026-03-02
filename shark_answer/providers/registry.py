@@ -18,7 +18,7 @@ DEFAULT_MODELS: dict[ModelProvider, str] = {
     ModelProvider.DEEPSEEK: "deepseek-chat",
     ModelProvider.GEMINI:   "gemini-2.0-flash",
     ModelProvider.QWEN:     "qwen-plus",
-    ModelProvider.GROK:     "grok-2",
+    ModelProvider.GROK:     "grok-2-vision-1212",
     ModelProvider.MINIMAX:  "MiniMax-Text-01",
     ModelProvider.KIMI:     "moonshot-v1-128k",
 }
@@ -68,8 +68,10 @@ class ProviderRegistry:
         else:
             # DeepSeek, Qwen, Grok, MiniMax, Kimi — all OpenAI-compatible
             from shark_answer.providers.openai_compat_provider import OpenAICompatProvider
+            # Only Grok supports image_url vision format among compat providers.
+            # DeepSeek-chat and Qwen-plus do NOT support image inputs via this API.
             vision_support = provider in {
-                ModelProvider.DEEPSEEK, ModelProvider.QWEN, ModelProvider.GROK,
+                ModelProvider.GROK,
             }
             instance = OpenAICompatProvider(
                 api_key=api_key,
