@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import re
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -32,6 +33,7 @@ from shark_answer.pipelines.pipeline_d_practical import run_pipeline_d
 from shark_answer.pipelines.router import route_question
 from shark_answer.providers.registry import ProviderRegistry
 from shark_answer.utils.cost_tracker import CostTracker
+from shark_answer.utils.file_converter import convert_file_to_images
 from shark_answer.utils.image_extractor import (
     extract_questions_from_images,
     ExtractedQuestion,
@@ -48,6 +50,9 @@ _cost_tracker: Optional[CostTracker] = None
 
 # In-memory history store (list of past submissions)
 _history: list[dict] = []
+
+# Chat history: key = "submission_id:question_number", value = list of messages
+_chat_histories: dict[str, list[dict]] = {}
 
 # Template and static paths
 _BASE_DIR = Path(__file__).parent
@@ -100,7 +105,7 @@ app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
 
-# ===== Pydantic models (kept from original) =====
+# ===== Pydantic models =====
 
 class AnswerVersionOut(BaseModel):
     version_number: int
@@ -146,6 +151,17 @@ class CostSummaryOut(BaseModel):
     by_subject: dict[str, float]
 
 
+class ChatRequest(BaseModel):
+    submission_id: str
+    question_number: str
+    message: str
+
+
+class ChatResponse(BaseModel):
+    reply: str
+    chat_history: list[dict]
+
+
 # ===========================================================
 # Frontend routes
 # ===========================================================
@@ -171,13 +187,17 @@ async def print_preview(request: Request, submission_id: str):
 
 @app.post("/api/solve", response_model=PaperResultOut)
 async def solve_exam_paper(
-    images: list[UploadFile] = File(..., description="Exam paper photos"),
+    images: list[UploadFile] = File(..., description="Exam paper files (images/PDF/DOCX)"),
     subject: str = Form(..., description="Subject"),
     language: str = Form("en", description="Output language: en or zh"),
     examiner_profile: str = Form("", description="Examiner profile name (optional)"),
     max_versions: int = Form(5, description="Max answer versions per question (1-5)"),
 ):
-    """Upload exam paper photos and get A/A* answers."""
+    """Upload exam paper files and get A/A* answers.
+
+    Accepted file types: JPG, PNG, WEBP, HEIC, PDF, DOCX.
+    PDFs are split into one image per page; DOCX text and images are extracted.
+    """
     if not _config or not _registry or not _cost_tracker:
         raise HTTPException(500, "Server not initialized")
 
@@ -192,18 +212,30 @@ async def solve_exam_paper(
     lang = Language.ZH if language == "zh" else Language.EN
     max_versions = max(1, min(5, max_versions))
 
-    # Read images
+    # Read and convert all uploaded files to image bytes
     image_data_list: list[bytes] = []
     filenames: list[str] = []
-    for img in images:
-        data = await img.read()
-        if not data:
-            raise HTTPException(400, f"Empty file: {img.filename}")
-        image_data_list.append(data)
-        filenames.append(img.filename or "unknown")
+    for upload in images:
+        raw_data = await upload.read()
+        if not raw_data:
+            raise HTTPException(400, f"Empty file: {upload.filename}")
+        fname = upload.filename or "unknown"
+        filenames.append(fname)
 
-    # Step 1: Extract questions
-    logger.info("Extracting questions from %d images for %s",
+        converted = convert_file_to_images(fname, raw_data)
+        if not converted:
+            logger.warning("Could not convert file '%s'; skipping.", fname)
+            continue
+        image_data_list.extend(converted)
+
+    if not image_data_list:
+        raise HTTPException(
+            422,
+            "No usable image content could be extracted from the uploaded files.",
+        )
+
+    # Step 1: Extract questions via AI vision
+    logger.info("Extracting questions from %d image(s) for subject '%s'",
                 len(image_data_list), subject)
     questions, extract_responses = await extract_questions_from_images(
         _registry, image_data_list,
@@ -212,7 +244,7 @@ async def solve_exam_paper(
 
     if not questions:
         raise HTTPException(
-            422, "Could not extract any questions from the uploaded images",
+            422, "Could not extract any questions from the uploaded files",
         )
 
     # Step 2: Load examiner profile
@@ -339,17 +371,152 @@ async def get_history_entry(submission_id: str):
 
 
 # ===========================================================
+# Chat / Answer Correction endpoint
+# ===========================================================
+
+@app.post("/api/chat", response_model=ChatResponse)
+async def chat_correction(req: ChatRequest):
+    """Answer correction chat powered by Claude as judge.
+
+    Send a question + user message to Claude; it reviews the existing
+    answer and returns a correction or explanation.
+    Conversation history is kept per (submission_id, question_number).
+    """
+    # Check submission first — this 404 can happen without AI config
+    entry = _find_history(req.submission_id)
+    if not entry:
+        raise HTTPException(404, "Submission not found")
+
+    if not _config or not _registry or not _cost_tracker:
+        raise HTTPException(500, "Server not initialized")
+
+    # Find the specific question result
+    qr = next(
+        (r for r in entry["data"]["results"]
+         if r["question_number"] == req.question_number),
+        None,
+    )
+    if not qr:
+        raise HTTPException(404, f"Question {req.question_number} not found in submission")
+
+    # Build chat key
+    chat_key = f"{req.submission_id}:{req.question_number}"
+    history = _chat_histories.setdefault(chat_key, [])
+
+    # Build context: first version answer (best available)
+    best_version = qr["versions"][0] if qr["versions"] else {}
+    answer_context = best_version.get("answer_text", "(no answer)")
+
+    # Build the judge prompt
+    system_prompt = (
+        "You are an expert A-Level CIE examiner and academic tutor. "
+        "A student is asking you to review or correct an AI-generated exam answer. "
+        "Be precise, cite marking criteria where relevant, and offer concise corrections. "
+        "If the answer is correct, confirm it and explain why marks would be awarded. "
+        "If the answer is wrong or incomplete, give the correct answer with reasoning. "
+        "Keep responses focused and exam-appropriate."
+    )
+
+    # Build conversation messages
+    messages_for_api: list[dict] = []
+
+    # First message includes full context
+    if not history:
+        initial_ctx = (
+            f"Question {req.question_number}: {qr['question_text']}\n\n"
+            f"Subject: {qr['subject']} | Pipeline: {qr['pipeline']}\n\n"
+            f"Generated Answer (Version 1):\n{answer_context}"
+        )
+        messages_for_api.append({
+            "role": "user",
+            "content": f"[Context]\n{initial_ctx}\n\n[Student question]\n{req.message}",
+        })
+    else:
+        # Replay previous turns
+        for turn in history:
+            messages_for_api.append({
+                "role": turn["role"],
+                "content": turn["content"],
+            })
+        messages_for_api.append({"role": "user", "content": req.message})
+
+    # Call Claude as judge via the provider registry
+    try:
+        from shark_answer.providers.claude_provider import ClaudeProvider
+        from shark_answer.config import ModelProvider
+
+        claude = _registry.get_provider(ModelProvider.CLAUDE)
+        if claude is None:
+            raise HTTPException(503, "Claude provider not configured")
+
+        import asyncio
+        response = await claude.generate(
+            system=system_prompt,
+            messages=messages_for_api,
+        )
+
+        if not response.success:
+            raise HTTPException(503, f"Judge model error: {response.error}")
+
+        reply_text = response.content
+        _cost_tracker.record(response, qr["subject"], "chat_correction")
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Chat correction failed")
+        raise HTTPException(500, f"Chat error: {exc}") from exc
+
+    # Persist history
+    if not history:
+        history.append({
+            "role": "user",
+            "content": messages_for_api[0]["content"],
+        })
+    else:
+        history.append({"role": "user", "content": req.message})
+    history.append({"role": "assistant", "content": reply_text})
+
+    # Return public-facing history (strip system context prefix from first msg)
+    public_history = []
+    for i, turn in enumerate(history):
+        content = turn["content"]
+        if i == 0 and turn["role"] == "user" and content.startswith("[Context]"):
+            # Extract just the student question part
+            parts = content.split("[Student question]\n", 1)
+            content = parts[1] if len(parts) > 1 else content
+        public_history.append({"role": turn["role"], "content": content})
+
+    return ChatResponse(reply=reply_text, chat_history=public_history)
+
+
+@app.get("/api/chat/{submission_id}/{question_number}")
+async def get_chat_history(submission_id: str, question_number: str):
+    """Retrieve existing chat history for a question."""
+    chat_key = f"{submission_id}:{question_number}"
+    raw = _chat_histories.get(chat_key, [])
+    # Strip system context from first user message for public display
+    public = []
+    for i, turn in enumerate(raw):
+        content = turn["content"]
+        if i == 0 and turn["role"] == "user" and content.startswith("[Context]"):
+            parts = content.split("[Student question]\n", 1)
+            content = parts[1] if len(parts) > 1 else content
+        public.append({"role": turn["role"], "content": content})
+    return public
+
+
+# ===========================================================
 # Export endpoints
 # ===========================================================
 
 @app.post("/api/export/pdf")
 async def export_pdf(request: Request):
-    """Export results as a formatted PDF using reportlab."""
+    """Export results as a formatted PDF."""
     body = await request.json()
     data = body.get("data")
     if not data:
         raise HTTPException(400, "Missing data")
-
     pdf_bytes = _generate_pdf(data)
     return StreamingResponse(
         io.BytesIO(pdf_bytes),
@@ -365,7 +532,6 @@ async def export_docx(request: Request):
     data = body.get("data")
     if not data:
         raise HTTPException(400, "Missing data")
-
     docx_bytes = _generate_docx(data)
     return StreamingResponse(
         io.BytesIO(docx_bytes),
@@ -374,8 +540,53 @@ async def export_docx(request: Request):
     )
 
 
+@app.post("/api/export/md")
+async def export_markdown(request: Request):
+    """Export results as Markdown (.md)."""
+    body = await request.json()
+    data = body.get("data")
+    if not data:
+        raise HTTPException(400, "Missing data")
+    md_text = _generate_markdown(data)
+    return StreamingResponse(
+        io.BytesIO(md_text.encode("utf-8")),
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": "attachment; filename=shark_answer_results.md"},
+    )
+
+
+@app.post("/api/export/txt")
+async def export_txt(request: Request):
+    """Export results as plain text (.txt)."""
+    body = await request.json()
+    data = body.get("data")
+    if not data:
+        raise HTTPException(400, "Missing data")
+    txt = _generate_txt(data)
+    return StreamingResponse(
+        io.BytesIO(txt.encode("utf-8")),
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": "attachment; filename=shark_answer_results.txt"},
+    )
+
+
+@app.post("/api/export/xlsx")
+async def export_xlsx(request: Request):
+    """Export results as an Excel spreadsheet (.xlsx)."""
+    body = await request.json()
+    data = body.get("data")
+    if not data:
+        raise HTTPException(400, "Missing data")
+    xlsx_bytes = _generate_xlsx(data)
+    return StreamingResponse(
+        io.BytesIO(xlsx_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=shark_answer_results.xlsx"},
+    )
+
+
 # ===========================================================
-# Existing API endpoints (unchanged)
+# Remaining API endpoints
 # ===========================================================
 
 @app.post("/api/practical/predict")
@@ -506,6 +717,193 @@ def _find_history(sid: str) -> Optional[dict]:
     return None
 
 
+def _strip_md(text: str) -> str:
+    """Strip basic Markdown formatting for plain text export."""
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    text = re.sub(r"\*(.+?)\*", r"\1", text)
+    text = re.sub(r"#{1,6}\s+", "", text)
+    text = re.sub(r"`{1,3}[^`]*`{1,3}", lambda m: m.group(0).strip("`"), text)
+    return text
+
+
+# ---- Markdown export ----
+
+def _generate_markdown(data: dict) -> str:
+    lines: list[str] = []
+    subject = (
+        data.get("results", [{}])[0].get("subject", "Unknown")
+        if data.get("results") else "Unknown"
+    )
+    lines.append("# Shark Answer — Exam Results\n")
+    lines.append(
+        f"**Subject:** {subject.replace('_', ' ').title()}  "
+        f"**Questions:** {data.get('total_questions', 0)}  "
+        f"**Cost:** ${data.get('cost_summary', {}).get('total_cost_usd', 0):.4f}\n"
+    )
+    lines.append("---\n")
+
+    for qr in data.get("results", []):
+        lines.append(f"## Question {qr['question_number']}\n")
+        lines.append(f"{qr.get('question_text', '')}\n")
+        if qr.get("errors"):
+            lines.append(f"> ⚠️ Errors: {'; '.join(qr['errors'])}\n")
+
+        for v in qr.get("versions", []):
+            badge = " ✓" if v.get("verified") else ""
+            score = f" · Score: {v['quality_score']}" if v.get("quality_score") is not None else ""
+            lines.append(
+                f"### Version {v['version_number']}: {v.get('approach_label', '')}"
+                f"{badge}{score}\n"
+            )
+            lines.append(f"*Provider: {v.get('provider', '')}*\n")
+            lines.append(f"{v.get('answer_text', '')}\n")
+            if v.get("explanation_text"):
+                lines.append(f"\n**Explanation:**\n{v['explanation_text']}\n")
+            lines.append("\n---\n")
+
+    return "\n".join(lines)
+
+
+# ---- Plain text export ----
+
+def _generate_txt(data: dict) -> str:
+    lines: list[str] = []
+    subject = (
+        data.get("results", [{}])[0].get("subject", "Unknown")
+        if data.get("results") else "Unknown"
+    )
+    sep = "=" * 60
+    thin = "-" * 40
+
+    lines.append("SHARK ANSWER — EXAM RESULTS")
+    lines.append(sep)
+    lines.append(
+        f"Subject: {subject.replace('_', ' ').title()}  "
+        f"Questions: {data.get('total_questions', 0)}  "
+        f"Cost: ${data.get('cost_summary', {}).get('total_cost_usd', 0):.4f}"
+    )
+    lines.append(sep)
+    lines.append("")
+
+    for qr in data.get("results", []):
+        lines.append(f"QUESTION {qr['question_number']}")
+        lines.append(thin)
+        lines.append(_strip_md(qr.get("question_text", "")))
+        lines.append("")
+
+        for v in qr.get("versions", []):
+            badge = " [VERIFIED]" if v.get("verified") else ""
+            score = f" Score:{v['quality_score']}" if v.get("quality_score") is not None else ""
+            lines.append(
+                f"  Version {v['version_number']}: "
+                f"{v.get('approach_label', '')} ({v.get('provider', '')}){badge}{score}"
+            )
+            lines.append("")
+            for para in _strip_md(v.get("answer_text", "")).split("\n"):
+                lines.append(f"  {para}")
+            lines.append("")
+            if v.get("explanation_text"):
+                lines.append("  [Explanation]")
+                for para in _strip_md(v["explanation_text"]).split("\n"):
+                    lines.append(f"  {para}")
+                lines.append("")
+
+        lines.append(sep)
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+# ---- Excel export ----
+
+def _generate_xlsx(data: dict) -> bytes:
+    """Generate an Excel workbook with one row per answer version."""
+    from openpyxl import Workbook  # type: ignore
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side  # type: ignore
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Results"
+
+    # Header style
+    hdr_fill = PatternFill("solid", fgColor="1E3A8A")  # dark blue
+    hdr_font = Font(bold=True, color="FFFFFF", size=11)
+    hdr_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    thin_border = Border(
+        left=Side(style="thin"), right=Side(style="thin"),
+        top=Side(style="thin"), bottom=Side(style="thin"),
+    )
+
+    headers = [
+        "Question #", "Question Text", "Pipeline", "Subject",
+        "Version", "Approach", "Provider", "Verified",
+        "Quality Score", "Language", "Answer", "Explanation",
+    ]
+    ws.append(headers)
+    for cell in ws[1]:
+        cell.fill = hdr_fill
+        cell.font = hdr_font
+        cell.alignment = hdr_align
+        cell.border = thin_border
+
+    # Set column widths
+    col_widths = [10, 40, 12, 16, 8, 20, 16, 10, 12, 10, 60, 60]
+    for i, w in enumerate(col_widths, start=1):
+        ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
+    ws.row_dimensions[1].height = 28
+
+    # Data rows
+    row_fill_a = PatternFill("solid", fgColor="F0F4FF")
+    row_fill_b = PatternFill("solid", fgColor="FFFFFF")
+    data_align = Alignment(vertical="top", wrap_text=True)
+
+    row_num = 2
+    for qi, qr in enumerate(data.get("results", [])):
+        for v in qr.get("versions", []):
+            fill = row_fill_a if qi % 2 == 0 else row_fill_b
+            row_data = [
+                qr["question_number"],
+                qr.get("question_text", ""),
+                qr.get("pipeline", ""),
+                qr.get("subject", ""),
+                v.get("version_number", ""),
+                v.get("approach_label", ""),
+                v.get("provider", ""),
+                "Yes" if v.get("verified") else "No",
+                v.get("quality_score", ""),
+                v.get("language", ""),
+                v.get("answer_text", ""),
+                v.get("explanation_text", ""),
+            ]
+            ws.append(row_data)
+            for cell in ws[row_num]:
+                cell.fill = fill
+                cell.alignment = data_align
+                cell.border = thin_border
+            ws.row_dimensions[row_num].height = 60
+            row_num += 1
+
+    # Summary sheet
+    ws2 = wb.create_sheet("Summary")
+    cost = data.get("cost_summary", {})
+    ws2.append(["Metric", "Value"])
+    for cell in ws2[1]:
+        cell.font = Font(bold=True)
+    ws2.append(["Total Questions", data.get("total_questions", 0)])
+    ws2.append(["Total Cost (USD)", f"${cost.get('total_cost_usd', 0):.4f}"])
+    ws2.append(["Total API Calls", cost.get("total_calls", 0)])
+    ws2.append(["Total Input Tokens", cost.get("total_input_tokens", 0)])
+    ws2.append(["Total Output Tokens", cost.get("total_output_tokens", 0)])
+    ws2.column_dimensions["A"].width = 24
+    ws2.column_dimensions["B"].width = 20
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+# ---- PDF export (unchanged) ----
+
 def _generate_pdf(data: dict) -> bytes:
     """Generate a PDF from results data using reportlab."""
     from reportlab.lib import colors
@@ -513,7 +911,7 @@ def _generate_pdf(data: dict) -> bytes:
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.units import mm
     from reportlab.platypus import (
-        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak,
+        SimpleDocTemplate, Paragraph, Spacer, PageBreak,
     )
 
     buf = io.BytesIO()
@@ -542,8 +940,10 @@ def _generate_pdf(data: dict) -> bytes:
 
     story: list = []
 
-    # Title
-    subject = data.get("results", [{}])[0].get("subject", "Unknown") if data.get("results") else "Unknown"
+    subject = (
+        data.get("results", [{}])[0].get("subject", "Unknown")
+        if data.get("results") else "Unknown"
+    )
     story.append(Paragraph("Shark Answer — Exam Results", styles["SharkTitle"]))
     story.append(Paragraph(
         f"Subject: {subject.replace('_', ' ').title()} &nbsp;|&nbsp; "
@@ -554,31 +954,21 @@ def _generate_pdf(data: dict) -> bytes:
     story.append(Spacer(1, 10))
 
     for qr in data.get("results", []):
-        story.append(Paragraph(
-            f"Question {qr['question_number']}",
-            styles["SharkH2"],
-        ))
-        # Escape HTML special characters in the question text
+        story.append(Paragraph(f"Question {qr['question_number']}", styles["SharkH2"]))
         q_text = (qr.get("question_text", "")
-                  .replace("&", "&amp;")
-                  .replace("<", "&lt;")
-                  .replace(">", "&gt;"))
+                  .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
         story.append(Paragraph(q_text, styles["SharkBody"]))
         story.append(Spacer(1, 6))
 
         for v in qr.get("versions", []):
-            badge = ""
-            if v.get("verified"):
-                badge = " [VERIFIED]"
+            badge = " [VERIFIED]" if v.get("verified") else ""
             story.append(Paragraph(
                 f"<b>Version {v['version_number']}: {v.get('approach_label', '')}</b>"
                 f" ({v.get('provider', '')}){badge}",
                 styles["SharkH2"],
             ))
             answer_text = (v.get("answer_text", "")
-                           .replace("&", "&amp;")
-                           .replace("<", "&lt;")
-                           .replace(">", "&gt;")
+                           .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                            .replace("\n", "<br/>"))
             story.append(Paragraph(answer_text, styles["SharkBody"]))
             story.append(Spacer(1, 6))
@@ -586,9 +976,7 @@ def _generate_pdf(data: dict) -> bytes:
             if v.get("explanation_text"):
                 story.append(Paragraph("<b>Explanation:</b>", styles["SharkBody"]))
                 expl = (v["explanation_text"]
-                        .replace("&", "&amp;")
-                        .replace("<", "&lt;")
-                        .replace(">", "&gt;")
+                        .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                         .replace("\n", "<br/>"))
                 story.append(Paragraph(expl, styles["SharkBody"]))
                 story.append(Spacer(1, 8))
@@ -599,19 +987,23 @@ def _generate_pdf(data: dict) -> bytes:
     return buf.getvalue()
 
 
+# ---- DOCX export (unchanged) ----
+
 def _generate_docx(data: dict) -> bytes:
     """Generate a Word document from results data."""
     from docx import Document
-    from docx.shared import Inches, Pt, RGBColor
+    from docx.shared import Pt, RGBColor
     from docx.enum.text import WD_ALIGN_PARAGRAPH
 
     doc = Document()
 
-    # Title
     title = doc.add_heading("Shark Answer — Exam Results", level=0)
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-    subject = data.get("results", [{}])[0].get("subject", "Unknown") if data.get("results") else "Unknown"
+    subject = (
+        data.get("results", [{}])[0].get("subject", "Unknown")
+        if data.get("results") else "Unknown"
+    )
     meta = doc.add_paragraph()
     meta.alignment = WD_ALIGN_PARAGRAPH.CENTER
     run = meta.add_run(
@@ -621,7 +1013,6 @@ def _generate_docx(data: dict) -> bytes:
     )
     run.font.size = Pt(9)
     run.font.color.rgb = RGBColor(120, 120, 120)
-
     doc.add_paragraph()
 
     for qr in data.get("results", []):
@@ -639,9 +1030,9 @@ def _generate_docx(data: dict) -> bytes:
 
             if v.get("explanation_text"):
                 p = doc.add_paragraph()
-                run = p.add_run("Explanation")
-                run.bold = True
-                run.font.size = Pt(11)
+                run2 = p.add_run("Explanation")
+                run2.bold = True
+                run2.font.size = Pt(11)
                 doc.add_paragraph(v["explanation_text"])
 
         doc.add_page_break()

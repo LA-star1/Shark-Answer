@@ -21,6 +21,20 @@ const sidebarToggle = document.getElementById('sidebarToggle');
 const newSubmission = document.getElementById('newSubmission');
 const profileSelect = document.getElementById('profileSelect');
 
+// ===== Accepted file types =====
+const ACCEPTED_EXTENSIONS = new Set([
+  '.jpg', '.jpeg', '.png', '.webp', '.heic', '.heif',
+  '.gif', '.bmp', '.tiff', '.tif',
+  '.pdf', '.docx', '.doc',
+]);
+const ACCEPTED_MIME_TYPES = new Set([
+  'image/jpeg', 'image/png', 'image/webp', 'image/gif',
+  'image/heic', 'image/heif', 'image/bmp', 'image/tiff',
+  'application/pdf',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/msword',
+]);
+
 // ===== Init =====
 document.addEventListener('DOMContentLoaded', () => {
   loadHistory();
@@ -55,11 +69,34 @@ fileInput.addEventListener('change', () => {
   fileInput.value = '';
 });
 
+function isAcceptedFile(f) {
+  if (ACCEPTED_MIME_TYPES.has(f.type)) return true;
+  const ext = '.' + f.name.split('.').pop().toLowerCase();
+  return ACCEPTED_EXTENSIONS.has(ext);
+}
+
+function getFileTypeLabel(f) {
+  const ext = f.name.split('.').pop().toLowerCase();
+  if (['pdf'].includes(ext)) return 'pdf';
+  if (['docx', 'doc'].includes(ext)) return 'docx';
+  if (['heic', 'heif'].includes(ext)) return 'heic';
+  return 'image';
+}
+
 function addFiles(fileList) {
+  let rejected = 0;
   for (const f of fileList) {
-    if (f.type.startsWith('image/')) {
+    if (isAcceptedFile(f)) {
       selectedFiles.push(f);
+    } else {
+      rejected++;
     }
+  }
+  if (rejected > 0) {
+    showToast(
+      `${rejected} file(s) skipped — unsupported format. Use JPG, PNG, WEBP, HEIC, PDF, or DOCX.`,
+      'warn'
+    );
   }
   renderPreviews();
   updateSubmitButton();
@@ -82,14 +119,43 @@ function renderPreviews() {
   selectedFiles.forEach((f, i) => {
     const div = document.createElement('div');
     div.className = 'file-thumb';
-    const img = document.createElement('img');
-    img.src = URL.createObjectURL(f);
-    img.alt = f.name;
+    const type = getFileTypeLabel(f);
+
+    if (type === 'image') {
+      const img = document.createElement('img');
+      img.src = URL.createObjectURL(f);
+      img.alt = f.name;
+      div.appendChild(img);
+    } else {
+      // Non-image: show an icon + filename
+      const icon = document.createElement('div');
+      icon.className = 'file-thumb-icon';
+      if (type === 'pdf') {
+        icon.innerHTML = `
+          <svg class="w-8 h-8 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+              d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"/>
+          </svg>
+          <span class="text-xs text-red-400 font-bold mt-1">PDF</span>`;
+      } else {
+        icon.innerHTML = `
+          <svg class="w-8 h-8 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+              d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+          </svg>
+          <span class="text-xs text-blue-400 font-bold mt-1">DOCX</span>`;
+      }
+      const fname = document.createElement('span');
+      fname.className = 'file-thumb-name';
+      fname.textContent = f.name.length > 14 ? f.name.slice(0, 11) + '…' : f.name;
+      div.appendChild(icon);
+      div.appendChild(fname);
+    }
+
     const btn = document.createElement('div');
     btn.className = 'remove-btn';
     btn.innerHTML = '✕';
     btn.onclick = () => removeFile(i);
-    div.appendChild(img);
     div.appendChild(btn);
     filePreviews.appendChild(div);
   });
@@ -306,6 +372,9 @@ function showResultsSection(data) {
 
   // Update total cost in sidebar
   updateCostDisplay(cost.total_cost_usd || 0);
+
+  // Setup chat panel
+  setupChatPanel(data);
 }
 
 // ===== Math rendering =====
@@ -361,7 +430,7 @@ async function exportPDF() {
     const blob = await resp.blob();
     downloadBlob(blob, 'shark_answer_results.pdf');
   } catch (e) {
-    alert('PDF export failed: ' + e.message);
+    showToast('PDF export failed: ' + e.message, 'error');
   }
 }
 
@@ -377,7 +446,55 @@ async function exportDocx() {
     const blob = await resp.blob();
     downloadBlob(blob, 'shark_answer_results.docx');
   } catch (e) {
-    alert('DOCX export failed: ' + e.message);
+    showToast('Word export failed: ' + e.message, 'error');
+  }
+}
+
+async function exportMarkdown() {
+  if (!currentResult) return;
+  try {
+    const resp = await fetch('/api/export/md', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data: currentResult }),
+    });
+    if (!resp.ok) throw new Error('Export failed');
+    const blob = await resp.blob();
+    downloadBlob(blob, 'shark_answer_results.md');
+  } catch (e) {
+    showToast('Markdown export failed: ' + e.message, 'error');
+  }
+}
+
+async function exportTxt() {
+  if (!currentResult) return;
+  try {
+    const resp = await fetch('/api/export/txt', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data: currentResult }),
+    });
+    if (!resp.ok) throw new Error('Export failed');
+    const blob = await resp.blob();
+    downloadBlob(blob, 'shark_answer_results.txt');
+  } catch (e) {
+    showToast('Text export failed: ' + e.message, 'error');
+  }
+}
+
+async function exportXlsx() {
+  if (!currentResult) return;
+  try {
+    const resp = await fetch('/api/export/xlsx', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data: currentResult }),
+    });
+    if (!resp.ok) throw new Error('Export failed');
+    const blob = await resp.blob();
+    downloadBlob(blob, 'shark_answer_results.xlsx');
+  } catch (e) {
+    showToast('Excel export failed: ' + e.message, 'error');
   }
 }
 
@@ -400,6 +517,149 @@ function downloadBlob(blob, filename) {
   URL.revokeObjectURL(url);
 }
 
+// ===== Chat panel =====
+
+function setupChatPanel(data) {
+  const panel = document.getElementById('chatPanel');
+  const select = document.getElementById('chatQuestionSelect');
+
+  if (!data.results || data.results.length === 0) {
+    panel.classList.add('hidden');
+    return;
+  }
+
+  panel.classList.remove('hidden');
+  select.innerHTML = '';
+  data.results.forEach(qr => {
+    const opt = document.createElement('option');
+    opt.value = qr.question_number;
+    opt.textContent = `Q${qr.question_number}`;
+    select.appendChild(opt);
+  });
+
+  // Clear chat messages
+  document.getElementById('chatMessages').innerHTML = '';
+}
+
+function toggleChatPanel() {
+  const body = document.getElementById('chatPanelBody');
+  const chevron = document.getElementById('chatChevron');
+  const open = body.classList.toggle('hidden');
+  chevron.style.transform = open ? '' : 'rotate(180deg)';
+}
+
+async function sendChatMessage() {
+  if (!currentSubmissionId && !_lastSubmissionId) return;
+  const sid = currentSubmissionId || _lastSubmissionId;
+
+  const select = document.getElementById('chatQuestionSelect');
+  const input = document.getElementById('chatInput');
+  const sendBtn = document.getElementById('chatSendBtn');
+  const messages = document.getElementById('chatMessages');
+
+  const message = input.value.trim();
+  if (!message) return;
+  const questionNumber = select.value;
+
+  // Disable send while waiting
+  sendBtn.disabled = true;
+  sendBtn.textContent = '...';
+  input.disabled = true;
+
+  // Show user message
+  appendChatMessage(messages, 'user', message);
+  input.value = '';
+
+  try {
+    const resp = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        submission_id: sid,
+        question_number: questionNumber,
+        message: message,
+      }),
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ detail: 'Unknown error' }));
+      throw new Error(err.detail || `HTTP ${resp.status}`);
+    }
+
+    const data = await resp.json();
+    appendChatMessage(messages, 'assistant', data.reply);
+
+  } catch (e) {
+    appendChatMessage(messages, 'error', 'Error: ' + e.message);
+  } finally {
+    sendBtn.disabled = false;
+    sendBtn.innerHTML = `
+      <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/>
+      </svg>
+      Send`;
+    input.disabled = false;
+    input.focus();
+  }
+}
+
+// Allow Enter to send (Shift+Enter = newline)
+document.addEventListener('DOMContentLoaded', () => {
+  const chatInput = document.getElementById('chatInput');
+  if (chatInput) {
+    chatInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendChatMessage();
+      }
+    });
+  }
+});
+
+function appendChatMessage(container, role, content) {
+  const wrap = document.createElement('div');
+
+  if (role === 'user') {
+    wrap.className = 'flex justify-end';
+    const bubble = document.createElement('div');
+    bubble.className = 'max-w-sm bg-shark-600/30 border border-shark-500/30 rounded-2xl rounded-tr-sm px-3 py-2 text-sm text-zinc-200';
+    bubble.textContent = content;
+    wrap.appendChild(bubble);
+  } else if (role === 'assistant') {
+    wrap.className = 'flex gap-2.5';
+    const avatar = document.createElement('div');
+    avatar.className = 'w-6 h-6 rounded-full bg-shark-600 flex items-center justify-center text-white text-xs font-bold shrink-0 mt-0.5';
+    avatar.textContent = 'C';
+    const bubble = document.createElement('div');
+    bubble.className = 'flex-1 bg-zinc-800/60 border border-zinc-700/50 rounded-2xl rounded-tl-sm px-3 py-2 text-sm text-zinc-200 answer-text';
+    bubble.innerHTML = formatAnswer(content);
+    wrap.appendChild(avatar);
+    wrap.appendChild(bubble);
+  } else {
+    wrap.className = 'text-xs text-red-400 px-2';
+    wrap.textContent = content;
+  }
+
+  container.appendChild(wrap);
+  container.scrollTop = container.scrollHeight;
+
+  // Render math in the new message
+  if (typeof renderMathInElement !== 'undefined') {
+    try {
+      renderMathInElement(wrap, {
+        delimiters: [
+          { left: '$$', right: '$$', display: true },
+          { left: '$', right: '$', display: false },
+        ],
+        throwOnError: false,
+      });
+    } catch (e) { /* ignore */ }
+  }
+}
+
+// Expose submission id for chat (set when results come back)
+let _lastSubmissionId = null;
+
 // ===== History =====
 async function loadHistory() {
   try {
@@ -407,6 +667,11 @@ async function loadHistory() {
     if (!resp.ok) return;
     const items = await resp.json();
     renderHistory(items);
+    // Store most recent submission id for chat
+    if (items.length > 0) {
+      _lastSubmissionId = items[0].id;
+      if (!currentSubmissionId) currentSubmissionId = _lastSubmissionId;
+    }
   } catch (e) {
     // silent
   }
@@ -492,8 +757,16 @@ function showProgressSection() {
 function showError(message) {
   progressSection.classList.add('hidden');
   uploadSection.classList.remove('hidden');
-  // Show error toast
-  const toast = el('div', 'fixed bottom-6 right-6 bg-red-600/90 text-white px-5 py-3 rounded-xl shadow-2xl text-sm z-50 max-w-md');
+  showToast(message, 'error');
+}
+
+function showToast(message, type = 'error') {
+  const colors = {
+    error: 'bg-red-600/90 text-white',
+    warn:  'bg-amber-600/90 text-white',
+    info:  'bg-zinc-700/90 text-zinc-100',
+  };
+  const toast = el('div', `fixed bottom-6 right-6 ${colors[type] || colors.info} px-5 py-3 rounded-xl shadow-2xl text-sm z-50 max-w-md`);
   toast.textContent = message;
   document.body.appendChild(toast);
   setTimeout(() => toast.remove(), 6000);

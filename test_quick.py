@@ -573,6 +573,266 @@ class TestLivePipelineC:
             print(f"  V{v.version_number}: verified={v.verified} ({v.provider})")
 
 
+class TestFileConverter:
+    """Unit tests for the file format converter utility."""
+
+    def test_native_image_passthrough(self):
+        from shark_answer.utils.file_converter import convert_file_to_images
+        fake_png = b'\x89PNG\r\n\x1a\n' + b'\x00' * 100
+        result = convert_file_to_images("exam.png", fake_png)
+        assert result == [fake_png]
+
+    def test_jpeg_passthrough(self):
+        from shark_answer.utils.file_converter import convert_file_to_images
+        fake_jpg = b'\xff\xd8\xff' + b'\x00' * 100
+        result = convert_file_to_images("scan.jpg", fake_jpg)
+        assert result == [fake_jpg]
+
+    def test_pdf_conversion_returns_list(self):
+        """Test that a minimal valid PDF is accepted (empty list or images)."""
+        from shark_answer.utils.file_converter import convert_file_to_images
+        # Minimal PDF-like bytes — will fail gracefully
+        fake_pdf = b'%PDF-1.4\n%%EOF'
+        result = convert_file_to_images("paper.pdf", fake_pdf)
+        # Should return a list (empty on parse error is acceptable)
+        assert isinstance(result, list)
+
+    def test_unknown_extension_passthrough(self):
+        from shark_answer.utils.file_converter import convert_file_to_images
+        data = b'\x00\x01\x02\x03'
+        result = convert_file_to_images("mystery.xyz", data)
+        assert result == [data]
+
+    def test_text_to_png_renders(self):
+        from shark_answer.utils.file_converter import _text_to_png
+        png = _text_to_png("Hello, World!\nLine 2")
+        if png is not None:  # Pillow might not be installed in CI
+            assert png[:4] == b'\x89PNG'
+
+    def test_docx_conversion_empty(self):
+        """Empty DOCX-like bytes should return empty list (graceful failure)."""
+        from shark_answer.utils.file_converter import convert_file_to_images
+        result = convert_file_to_images("empty.docx", b'not a real docx')
+        assert isinstance(result, list)
+
+
+class TestMarkdownExport:
+    """Tests for Markdown export generation."""
+
+    def _sample_data(self):
+        return {
+            "total_questions": 1,
+            "cost_summary": {"total_cost_usd": 0.005},
+            "results": [{
+                "question_number": "1(a)",
+                "question_text": "Describe Newton's second law",
+                "pipeline": "A",
+                "subject": "physics",
+                "versions": [{
+                    "version_number": 1,
+                    "answer_text": "F = ma where F is force, m is mass, a is acceleration",
+                    "explanation_text": "This follows from first principles",
+                    "approach_label": "Direct definition",
+                    "provider": "claude",
+                    "verified": True,
+                    "quality_score": 95.0,
+                    "language": "en",
+                }],
+                "verification_notes": "",
+                "disagreement_resolved": True,
+                "errors": [],
+            }],
+        }
+
+    def test_markdown_contains_question(self):
+        from shark_answer.app import _generate_markdown
+        md = _generate_markdown(self._sample_data())
+        assert "Question 1(a)" in md
+        assert "Newton" in md
+
+    def test_markdown_contains_answer(self):
+        from shark_answer.app import _generate_markdown
+        md = _generate_markdown(self._sample_data())
+        assert "F = ma" in md
+
+    def test_markdown_has_headers(self):
+        from shark_answer.app import _generate_markdown
+        md = _generate_markdown(self._sample_data())
+        assert md.startswith("# Shark Answer")
+
+    def test_markdown_verified_badge(self):
+        from shark_answer.app import _generate_markdown
+        md = _generate_markdown(self._sample_data())
+        assert "✓" in md
+
+    def test_txt_export(self):
+        from shark_answer.app import _generate_txt
+        txt = _generate_txt(self._sample_data())
+        assert "SHARK ANSWER" in txt
+        assert "Question 1(a)" in txt.upper() or "QUESTION 1(A)" in txt.upper()
+        assert "F = ma" in txt
+
+    def test_xlsx_export(self):
+        from shark_answer.app import _generate_xlsx
+        xlsx_bytes = _generate_xlsx(self._sample_data())
+        assert len(xlsx_bytes) > 100
+        # XLSX is a ZIP, starts with PK
+        assert xlsx_bytes[:2] == b'PK'
+
+    def test_xlsx_has_content(self):
+        """Load the generated XLSX and verify row content."""
+        from shark_answer.app import _generate_xlsx
+        import io
+        try:
+            from openpyxl import load_workbook
+        except ImportError:
+            pytest.skip("openpyxl not installed")
+        xlsx_bytes = _generate_xlsx(self._sample_data())
+        wb = load_workbook(io.BytesIO(xlsx_bytes))
+        ws = wb.active
+        # Row 1 = headers, row 2 = data
+        assert ws.max_row >= 2
+        # Check question number in column A row 2
+        cell_val = ws.cell(row=2, column=1).value
+        assert cell_val == "1(a)"
+
+
+class TestNewExportEndpoints:
+    """Test new export endpoints via FastAPI test client."""
+
+    def _sample_payload(self):
+        return {
+            "data": {
+                "total_questions": 1,
+                "cost_summary": {"total_cost_usd": 0.001},
+                "results": [{
+                    "question_number": "2",
+                    "question_text": "Explain photosynthesis",
+                    "pipeline": "B",
+                    "subject": "biology",
+                    "versions": [{
+                        "version_number": 1,
+                        "answer_text": "Photosynthesis converts CO2 and water into glucose using light energy.",
+                        "explanation_text": "This is a fundamental biological process.",
+                        "approach_label": "Standard explanation",
+                        "provider": "claude",
+                        "verified": False,
+                        "quality_score": 82.0,
+                        "language": "en",
+                    }],
+                    "verification_notes": "",
+                    "disagreement_resolved": True,
+                    "errors": [],
+                }],
+            }
+        }
+
+    @pytest.mark.asyncio
+    async def test_export_markdown_endpoint(self):
+        from httpx import AsyncClient, ASGITransport
+        from shark_answer.app import app
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post("/api/export/md", json=self._sample_payload())
+            assert resp.status_code == 200
+            assert "markdown" in resp.headers["content-type"]
+            assert "Shark Answer" in resp.text
+
+    @pytest.mark.asyncio
+    async def test_export_txt_endpoint(self):
+        from httpx import AsyncClient, ASGITransport
+        from shark_answer.app import app
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post("/api/export/txt", json=self._sample_payload())
+            assert resp.status_code == 200
+            assert "text/plain" in resp.headers["content-type"]
+            assert "SHARK ANSWER" in resp.text
+
+    @pytest.mark.asyncio
+    async def test_export_xlsx_endpoint(self):
+        from httpx import AsyncClient, ASGITransport
+        from shark_answer.app import app
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post("/api/export/xlsx", json=self._sample_payload())
+            assert resp.status_code == 200
+            assert "spreadsheetml" in resp.headers["content-type"]
+            assert resp.content[:2] == b'PK'
+
+
+class TestChatEndpoint:
+    """Tests for the answer correction chat endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_chat_missing_submission(self):
+        from httpx import AsyncClient, ASGITransport
+        from shark_answer.app import app
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post("/api/chat", json={
+                "submission_id": "nonexistent",
+                "question_number": "1",
+                "message": "Is this correct?",
+            })
+            assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_chat_history_endpoint_empty(self):
+        from httpx import AsyncClient, ASGITransport
+        from shark_answer.app import app
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/api/chat/unknown_id/1")
+            # Should return empty list or 200 with []
+            assert resp.status_code == 200
+            assert resp.json() == []
+
+    @pytest.mark.asyncio
+    async def test_index_contains_chat_panel(self):
+        from httpx import AsyncClient, ASGITransport
+        from shark_answer.app import app
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/")
+            assert resp.status_code == 200
+            assert "chatPanel" in resp.text
+            assert "Answer Correction Chat" in resp.text
+
+    @pytest.mark.asyncio
+    async def test_index_accepts_pdf_docx(self):
+        """Verify the new file input accepts PDF and DOCX."""
+        from httpx import AsyncClient, ASGITransport
+        from shark_answer.app import app
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/")
+            assert resp.status_code == 200
+            assert ".pdf" in resp.text
+            assert ".docx" in resp.text
+
+    @pytest.mark.asyncio
+    async def test_index_has_new_export_buttons(self):
+        """Verify MD, TXT, XLSX export buttons appear in HTML."""
+        from httpx import AsyncClient, ASGITransport
+        from shark_answer.app import app
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/")
+            assert resp.status_code == 200
+            assert "exportMarkdown" in resp.text
+            assert "exportTxt" in resp.text
+            assert "exportXlsx" in resp.text
+
+
 @live
 class TestLiveAPI:
     """Live test for the FastAPI endpoints."""
