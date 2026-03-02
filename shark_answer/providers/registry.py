@@ -104,12 +104,15 @@ class ProviderRegistry:
             # Only Grok supports the image_url vision format among compat providers.
             # DeepSeek-chat, Qwen-plus, GLM text models do NOT support image inputs.
             vision_support = provider in {ModelProvider.GROK}
+            # kimi-k2.5 is a reasoning model that only accepts temperature=1.
+            fixed_temp = 1.0 if provider == ModelProvider.KIMI else None
             instance = OpenAICompatProvider(
                 api_key=api_key,
                 base_url=base_url,
                 model_name=model_name,
                 provider_name=provider.value,
                 supports_vision=vision_support,
+                fixed_temperature=fixed_temp,
             )
 
         self._providers[provider] = instance

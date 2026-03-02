@@ -22,10 +22,12 @@ class OpenAICompatProvider(BaseProvider):
     def __init__(self, api_key: str, base_url: str | None = None,
                  model_name: str | None = None,
                  provider_name: str = "openai_compat",
-                 supports_vision: bool = True):
+                 supports_vision: bool = True,
+                 fixed_temperature: float | None = None):
         super().__init__(api_key, base_url, model_name)
         self.provider_name = provider_name
         self.supports_vision = supports_vision
+        self.fixed_temperature = fixed_temperature  # override caller's temperature if set (e.g. Kimi only allows 1.0)
         self.client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
 
     async def generate(self, prompt: str, system: str = "",
@@ -43,10 +45,11 @@ class OpenAICompatProvider(BaseProvider):
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
 
+        effective_temp = self.fixed_temperature if self.fixed_temperature is not None else temperature
         resp = await self.client.chat.completions.create(
             model=self.model_name,
             messages=messages,
-            temperature=temperature,
+            temperature=effective_temp,
             max_tokens=max_tokens,
         )
         choice = resp.choices[0]
@@ -96,10 +99,11 @@ class OpenAICompatProvider(BaseProvider):
             ],
         })
 
+        effective_temp = self.fixed_temperature if self.fixed_temperature is not None else temperature
         resp = await self.client.chat.completions.create(
             model=self.model_name,
             messages=messages,
-            temperature=temperature,
+            temperature=effective_temp,
             max_tokens=max_tokens,
         )
         choice = resp.choices[0]
