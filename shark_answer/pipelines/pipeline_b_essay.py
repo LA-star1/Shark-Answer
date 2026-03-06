@@ -321,28 +321,40 @@ async def run_pipeline_b(
 
     # ===== Step 3: Quality Gate (judge scores each draft via fallback chain) =====
     # JUDGE_FALLBACK_CHAIN = [Claude, GPT-4o, Gemini] — first available succeeds.
-    # If all three are down the draft is passed with a default score so the
-    # pipeline never blocks completely on judge unavailability.
-    logger.info("Pipeline B: Judging %d drafts (chain: %s)",
+    # Phase A: all judge calls run in PARALLEL (asyncio.gather) so latency is
+    #          bounded by the single slowest call, not N×slowest.
+    # Phase B: revisions for below-A drafts run sequentially (usually 0-1 drafts).
+    # If all three judge providers are down the draft passes with a default score
+    # so the pipeline never blocks completely on judge unavailability.
+    logger.info("Pipeline B: Judging %d drafts in parallel (chain: %s)",
                 len(drafts), " → ".join(p.value for p in JUDGE_FALLBACK_CHAIN))
-
-    passing_drafts: list[tuple[ModelProvider, str, str, float]] = []  # model, angle, text, score
 
     judge_sys = JUDGE_SYSTEM.format(subject=subject)
 
-    for model, angle, draft in drafts:
-        judge_prompt = f"Question:\n{question.text}\n\nEssay to evaluate:\n{draft}"
-        judge_resp = await registry.call_with_fallback(
+    async def _judge_one(
+        model: ModelProvider, angle: str, draft: str
+    ) -> tuple[ModelProvider, str, str, object]:
+        """Judge a single draft; returns (model, angle, draft, judge_resp)."""
+        j_prompt = f"Question:\n{question.text}\n\nEssay to evaluate:\n{draft}"
+        j_resp = await registry.call_with_fallback(
             JUDGE_FALLBACK_CHAIN,
-            prompt=judge_prompt,
+            prompt=j_prompt,
             system=judge_sys,
             temperature=0.1,
             max_tokens=2000,
         )
-        cost_tracker.record(judge_resp, subject, "B-judge")
+        cost_tracker.record(j_resp, subject, "B-judge")
+        return model, angle, draft, j_resp
 
+    # Phase A — parallel judge pass
+    judge_tasks = [_judge_one(m, a, d) for m, a, d in drafts]
+    judge_results: list[tuple] = await asyncio.gather(*judge_tasks)
+
+    # Phase B — process results; revise below-A drafts (sequential, usually few)
+    passing_drafts: list[tuple[ModelProvider, str, str, float]] = []
+
+    for model, angle, draft, judge_resp in judge_results:
         if not judge_resp.success:
-            # All judge providers unavailable — pass draft with neutral score
             logger.warning("All judge providers failed for draft from %s; passing with default score",
                            model.value)
             passing_drafts.append((model, angle, draft, 75.0))
@@ -409,23 +421,29 @@ async def run_pipeline_b(
     humanized: list[str] = await asyncio.gather(*humanize_tasks)
 
     # ===== Step 5: Build versions with explanations =====
-    # Explanations use the same fallback chain as judging.
-    for i, ((model, angle, _, score), final_text) in enumerate(
-        zip(passing_drafts[:max_versions], humanized)
-    ):
-        explain_prompt = build_explanation_prompt(
-            Pipeline.ESSAY, question.text, final_text, language
-        )
-        explain_resp = await registry.call_with_fallback(
+    # Explanations use the same fallback chain as judging, run in PARALLEL so
+    # N explanations cost only one round-trip latency instead of N.
+    top_versions = list(zip(passing_drafts[:max_versions], humanized))
+
+    async def _explain_one(final_text: str) -> str:
+        e_prompt = build_explanation_prompt(Pipeline.ESSAY, question.text, final_text, language)
+        e_resp = await registry.call_with_fallback(
             JUDGE_FALLBACK_CHAIN,
-            prompt=explain_prompt,
+            prompt=e_prompt,
             system="You are a CIE A-Level essay coach creating study explanations.",
             temperature=0.4,
             max_tokens=3000,
         )
-        cost_tracker.record(explain_resp, subject, "B-explain")
-        explanation = explain_resp.content if explain_resp.success else ""
+        cost_tracker.record(e_resp, subject, "B-explain")
+        return e_resp.content if e_resp.success else ""
 
+    explanations: list[str] = await asyncio.gather(
+        *[_explain_one(ft) for (_, _, _, _), ft in top_versions]
+    )
+
+    for i, (((model, angle, _, score), final_text), explanation) in enumerate(
+        zip(top_versions, explanations)
+    ):
         # Derive display label from angle or model
         assigned_angle = _ESSAY_MODEL_ANGLES.get(model, "")
         label = _ANGLE_DISPLAY.get(assigned_angle, None) or _extract_angle_title(angle)
