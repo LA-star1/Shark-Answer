@@ -27,6 +27,7 @@ import logging
 from typing import Optional
 
 from shark_answer.config import AppConfig, ModelProvider, Pipeline, PIPELINE_CONFIG
+from shark_answer.providers.registry import SOLVER_TIMEOUT
 
 # Judge / explain fallback chain — tried in order until one succeeds.
 # Claude is primary (best essay scoring); GPT-4o and Gemini are hot standbys.
@@ -264,10 +265,17 @@ async def run_pipeline_b(
             return model, None
         assigned_angle = _ESSAY_MODEL_ANGLES.get(model, "balanced multi-perspective analysis")
         sys = ANGLE_SYSTEM.format(subject=subject, angle=assigned_angle)
-        resp = await inst.generate(
-            prompt=question_prompt, system=sys,
-            temperature=0.7, max_tokens=1500,
-        )
+        try:
+            resp = await asyncio.wait_for(
+                inst.generate(
+                    prompt=question_prompt, system=sys,
+                    temperature=0.7, max_tokens=1500,
+                ),
+                timeout=SOLVER_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("[%s] angle generation timed out after %.0fs", model.value, SOLVER_TIMEOUT)
+            return model, None
         cost_tracker.record(resp, subject, "B-angle")
         return model, (resp.content if resp.success else None)
 
@@ -299,10 +307,17 @@ async def run_pipeline_b(
             word_target=word_target,
         )
         prompt = f"Write your complete essay answer.{lang_suffix}"
-        resp = await inst.generate(
-            prompt=prompt, system=sys,
-            temperature=0.6, max_tokens=6000,
-        )
+        try:
+            resp = await asyncio.wait_for(
+                inst.generate(
+                    prompt=prompt, system=sys,
+                    temperature=0.6, max_tokens=6000,
+                ),
+                timeout=SOLVER_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("[%s] draft writing timed out after %.0fs", model.value, SOLVER_TIMEOUT)
+            return model, None
         cost_tracker.record(resp, subject, "B-draft")
         return model, (resp.content if resp.success else None)
 
@@ -407,10 +422,18 @@ async def run_pipeline_b(
             examiner_guidance=examiner_guidance,
         )
         prompt = f"Rewrite this essay in your personality voice:\n\n{draft}{lang_suffix}"
-        resp = await inst.generate(
-            prompt=prompt, system=sys,
-            temperature=0.7, max_tokens=6000,
-        )
+        try:
+            resp = await asyncio.wait_for(
+                inst.generate(
+                    prompt=prompt, system=sys,
+                    temperature=0.7, max_tokens=6000,
+                ),
+                timeout=SOLVER_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("[%s] humanize timed out after %.0fs — returning original draft",
+                           model.value, SOLVER_TIMEOUT)
+            return draft
         cost_tracker.record(resp, subject, "B-humanize")
         return resp.content if resp.success else draft
 

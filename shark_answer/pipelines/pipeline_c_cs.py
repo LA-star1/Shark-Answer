@@ -27,7 +27,7 @@ from shark_answer.knowledge_base.predictor import build_prediction_context
 from shark_answer.modules.examiner_profile import ExaminerProfile
 from shark_answer.modules.explanation import build_explanation_prompt
 from shark_answer.pipelines.base import AnswerVersion, PipelineResult
-from shark_answer.providers.registry import ProviderRegistry
+from shark_answer.providers.registry import ProviderRegistry, SOLVER_TIMEOUT
 from shark_answer.utils.cost_tracker import CostTracker
 from shark_answer.utils.image_extractor import ExtractedQuestion
 
@@ -298,11 +298,18 @@ async def _verify_code(
         pseudocode=answer_text,
         test_cases=f"Based on the question:\n{question_text}\nGenerate 3-5 test cases.",
     )
-    resp = await inst.generate(
-        prompt=prompt,
-        system="Convert CIE pseudocode to runnable Python with test assertions.",
-        temperature=0.1, max_tokens=3000,
-    )
+    try:
+        resp = await asyncio.wait_for(
+            inst.generate(
+                prompt=prompt,
+                system="Convert CIE pseudocode to runnable Python with test assertions.",
+                temperature=0.1, max_tokens=3000,
+            ),
+            timeout=SOLVER_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("[%s] C-verify timed out after %.0fs", model.value, SOLVER_TIMEOUT)
+        return False
     cost_tracker.record(resp, subject, "C-verify")
 
     if not resp.success:
