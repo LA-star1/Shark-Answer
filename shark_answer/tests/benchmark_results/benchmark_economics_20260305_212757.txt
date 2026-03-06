@@ -1,0 +1,34 @@
+========================================================================
+  SHARK ANSWER  —  BENCHMARK REPORT
+  Generated: 2026-03-05 21:27:57   |  versions=1  max_q=2
+========================================================================
+
+┌─────────────────────┬──────────┬───────┬───────┬──────┬─────────┐
+│ Subject             │ Paper    │ Score │ Grade │ Time │    Cost │
+├─────────────────────┼──────────┼───────┼───────┼──────┼─────────┤
+│ economics             │ 2024_jun │     — │     — │  636s │ $ 0.104 │
+├─────────────────────┼──────────┼───────┼───────┼──────┼─────────┤
+│ TOTAL / OVERALL       │          │ 0/0 │     U │  636s │ $ 0.104 │
+└─────────────────────┴──────────┴───────┴───────┴──────┴─────────┘
+
+── ECONOMICS  (economics_9708)
+   Paper: 2024_june_qp_21.pdf   MS: 2024_june_ms_21.pdf   Paper#: 21
+   Timing: extract=76.6s  solve=508.9s  score=50.6s  total=636.1s
+   Cost: $0.1044
+   Models OK:   gemini
+   ⚠ 2 question(s) had SCORE_FAILED (excluded from score totals)
+
+   Q#        Marks      Score        Grade   Time
+   ──────── ────── ────────── ──────────── ──────
+   1(a)(i)       1   FAILED/1 SCORE_FAILED 250.8s
+             ⚠ SCORE_FAILED after 3 attempts: Model error: Error code: 400 - {'type':
+   1(a)(ii)      1   FAILED/1 SCORE_FAILED 308.7s
+             ⚠ SCORE_FAILED after 3 attempts: Model error: Error code: 400 - {'type':
+
+── MODEL HEALTH
+   Provider           OK  FAIL
+   ──────────────── ────  ────
+   gemini              2     0
+
+── AREAS FOR IMPROVEMENT
+========================================================================

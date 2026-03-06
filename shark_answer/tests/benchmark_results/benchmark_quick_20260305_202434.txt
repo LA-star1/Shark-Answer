@@ -1,0 +1,47 @@
+========================================================================
+  SHARK ANSWER  —  BENCHMARK REPORT
+  Generated: 2026-03-05 20:24:34   |  versions=1  max_q=2
+========================================================================
+
+┌─────────────────────┬──────────┬───────┬───────┬──────┬─────────┐
+│ Subject             │ Paper    │ Score │ Grade │ Time │    Cost │
+├─────────────────────┼──────────┼───────┼───────┼──────┼─────────┤
+│ economics             │ 2024_jun │   1/1 │    A* │  270s │ $ 1.886 │
+│ physics               │ 2024_jun │   0/3 │     U │  364s │ $ 2.203 │
+├─────────────────────┼──────────┼───────┼───────┼──────┼─────────┤
+│ TOTAL / OVERALL       │          │ 1/4 │     U │  635s │ $ 4.089 │
+└─────────────────────┴──────────┴───────┴───────┴──────┴─────────┘
+
+── ECONOMICS  (economics_9708)
+   Paper: 2024_june_qp_21.pdf   MS: 2024_june_ms_21.pdf   Paper#: 21
+   Timing: extract=64.0s  solve=202.0s  score=4.5s  total=270.5s
+   Cost: $1.8862
+   Models OK:   claude
+
+   Q#        Marks   Score  Grade   Time
+   ──────── ────── ─────── ────── ──────
+   1             0     0/0     A* 114.4s
+   1(a)(i)       1     1/1     A*  92.1s
+
+── PHYSICS  (physics_9702)
+   Paper: 2024_june_qp_21.pdf   MS: 2024_june_ms_21.pdf   Paper#: 21
+   Timing: extract=197.3s  solve=159.7s  score=7.3s  total=364.4s
+   Cost: $2.2033
+   Models OK:   claude, o3pro
+
+   Q#        Marks   Score  Grade   Time
+   ──────── ────── ─────── ────── ──────
+   1             0     0/0     A*  80.5s
+   1(a)          3     0/3      U  86.5s
+
+── MODEL HEALTH
+   Provider           OK  FAIL
+   ──────────────── ────  ────
+   claude              3     0
+   o3pro               1     0
+
+── AREAS FOR IMPROVEMENT
+   physics                 0.0%  (grade U)
+   economics             100.0%  (grade A*)
+
+========================================================================

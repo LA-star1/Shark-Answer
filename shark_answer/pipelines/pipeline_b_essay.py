@@ -27,7 +27,6 @@ import logging
 from typing import Optional
 
 from shark_answer.config import AppConfig, ModelProvider, Pipeline, PIPELINE_CONFIG
-from shark_answer.knowledge_base.store import KnowledgeBase
 from shark_answer.modules.examiner_profile import ExaminerProfile
 from shark_answer.modules.explanation import build_explanation_prompt
 from shark_answer.pipelines.base import AnswerVersion, PipelineResult
@@ -52,6 +51,35 @@ _ANGLE_DISPLAY: dict[str, str] = {
     "policy-oriented perspective":                  "Policy-Oriented",
     "data/evidence-based empirical approach":       "Data & Evidence",
 }
+
+# ──────────────────────────────────────────────────────────────────────────────
+# KB context budget: premium models get full 29k context (~$0.44/call input);
+# budget models get a 3k excerpt (~750 tokens, ~$0.003/call at Kimi rates).
+# The context is ordered by importance so the first 3k chars contain the
+# subject summary and the most relevant mark-scheme content.
+# ──────────────────────────────────────────────────────────────────────────────
+_PREMIUM_KB_MODELS: frozenset[ModelProvider] = frozenset({
+    ModelProvider.CLAUDE,
+    ModelProvider.GPT4O,
+})
+_BUDGET_KB_CHARS: int = 3_000
+
+
+def _trim_kb_context(kb_context: str, max_chars: int = _BUDGET_KB_CHARS) -> str:
+    """Return a shorter KB context excerpt for budget solver models.
+
+    The retriever builds context in priority order (subject summary → mark schemes
+    → examiner reports), so the first 3 k chars contain the most useful content.
+    """
+    if not kb_context or len(kb_context) <= max_chars:
+        return kb_context
+    truncated = kb_context[:max_chars]
+    # Snap to last paragraph boundary to avoid cutting mid-sentence
+    last_para = truncated.rfind("\n\n")
+    if last_para > int(max_chars * 0.7):
+        truncated = truncated[:last_para]
+    return truncated + "\n\n[...context trimmed — budget model receives summary only]"
+
 
 ANGLE_SYSTEM = """You are a CIE A-Level {subject} essay specialist.
 
@@ -99,10 +127,11 @@ Essay requirements (exactly as it would appear on the exam paper):
 - Counter-arguments addressed with genuine evaluation
 - Conclusion with justified judgement (not a summary — a verdict)
 
+CRITICAL LENGTH RULE: Write exactly {word_target} words. Do NOT exceed this. Do NOT pad with repetition or summary restatements. Every sentence must earn marks.
+
 {marking_context}
 {examiner_guidance}
-
-Word count target: {word_target} words."""
+"""
 
 JUDGE_SYSTEM = """You are a senior CIE A-Level {subject} examiner.
 Score this essay against the CIE mark scheme criteria.
@@ -162,7 +191,7 @@ async def run_pipeline_b(
     registry: ProviderRegistry,
     config: AppConfig,
     cost_tracker: CostTracker,
-    knowledge_base: Optional[KnowledgeBase] = None,
+    kb_context: str = "",
     examiner_profile: Optional[ExaminerProfile] = None,
     language: str = "en",
     max_versions: int = 7,
@@ -174,11 +203,8 @@ async def run_pipeline_b(
         subject=subject,
     )
 
-    marking_context = ""
-    if knowledge_base:
-        marking_context = knowledge_base.get_marking_context(
-            subject, question.topic_hints[0] if question.topic_hints else ""
-        )
+    # kb_context is pre-built by the caller (app.py) via knowledge_base.retriever
+    marking_context = kb_context
 
     examiner_guidance = ""
     if examiner_profile:
@@ -195,8 +221,10 @@ async def run_pipeline_b(
         result.errors.append("No brainstorm models configured for Pipeline B")
         return result
 
-    # Limit to max_versions writers
-    angle_models = all_angle_models[:max_versions]
+    # ALL configured models always participate in angle + draft generation.
+    # max_versions only limits the FINAL output (how many versions the user sees).
+    # This ensures cross-model quality competition even when versions=1.
+    angle_models = all_angle_models
     word_target = max(300, question.marks * 40)
 
     question_prompt = (
@@ -238,10 +266,13 @@ async def run_pipeline_b(
         inst = registry.get(model)
         if not inst:
             return model, None
+        # Premium models (Claude, GPT) receive the full 29k KB context.
+        # Budget models receive a 3k excerpt to cut input-token cost ~10×.
+        ctx = marking_context if model in _PREMIUM_KB_MODELS else _trim_kb_context(marking_context)
         sys = DRAFT_SYSTEM.format(
             subject=subject,
             angle_json=angle_json,
-            marking_context=marking_context,
+            marking_context=ctx,
             examiner_guidance=examiner_guidance,
             word_target=word_target,
         )
@@ -306,11 +337,12 @@ async def run_pipeline_b(
                     f"ORIGINAL ESSAY:\n{draft}\n\n"
                     f"Rewrite to achieve A/A* standard.{lang_suffix}"
                 )
+                rev_ctx = marking_context if model in _PREMIUM_KB_MODELS else _trim_kb_context(marking_context)
                 rev_resp = await inst.generate(
                     prompt=revision_prompt,
                     system=DRAFT_SYSTEM.format(
                         subject=subject, angle_json=angle,
-                        marking_context=marking_context,
+                        marking_context=rev_ctx,
                         examiner_guidance=examiner_guidance,
                         word_target=word_target,
                     ),
@@ -320,8 +352,12 @@ async def run_pipeline_b(
                 if rev_resp.success:
                     passing_drafts.append((model, angle, rev_resp.content, score + 5))
 
+    # Sort by score (best first) before limiting to max_versions for output.
+    # This ensures versions=1 always outputs the highest-scoring draft.
+    passing_drafts.sort(key=lambda x: x[3], reverse=True)
+
     # ===== Step 4: Humanize with model-matched writing personalities =====
-    logger.info("Pipeline B: Humanizing %d drafts", len(passing_drafts))
+    logger.info("Pipeline B: Humanizing %d drafts (keeping top %d)", len(passing_drafts), max_versions)
 
     async def _humanize(model: ModelProvider, draft: str, personality: int) -> str:
         inst = registry.get(model)

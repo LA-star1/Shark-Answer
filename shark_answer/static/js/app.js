@@ -123,7 +123,7 @@ function renderPreviews() {
 }
 function updateSubmitButton() { submitBtn.disabled = selectedFiles.length === 0; }
 
-// ── Submit ──
+// ── Submit (SSE streaming) ──
 submitBtn.addEventListener('click', submitPaper);
 async function submitPaper() {
   if (selectedFiles.length === 0) return;
@@ -136,46 +136,109 @@ async function submitPaper() {
 
   showProgressSection();
   setStage('upload');
+
   try {
-    await sleep(300);
-    setStage('extract');
-    const response = await fetch('/api/solve', { method: 'POST', body: fd });
-    setStage('solve');
-    await sleep(200);
-    setStage('verify');
-    await sleep(200);
-    setStage('finalize');
+    const response = await fetch('/api/solve/stream', { method: 'POST', body: fd });
     if (!response.ok) {
       const err = await response.json().catch(() => ({ detail: 'Unknown error' }));
       throw new Error(err.detail || `HTTP ${response.status}`);
     }
-    const data = await response.json();
-    currentResult = data;
-    await sleep(300);
-    completeAllStages();
-    await sleep(500);
-    showResultsSection(data);
-    loadHistory();
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let finalData = null;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      // Parse complete SSE events (separated by \n\n)
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop() ?? '';   // keep incomplete trailing chunk
+
+      for (const eventStr of parts) {
+        if (!eventStr.trim()) continue;
+        let eventName = 'message';
+        let dataStr = '';
+        for (const line of eventStr.split('\n')) {
+          if (line.startsWith('event: ')) eventName = line.slice(7).trim();
+          else if (line.startsWith('data: ')) dataStr = line.slice(6).trim();
+        }
+        if (!dataStr) continue;
+        let evData;
+        try { evData = JSON.parse(dataStr); } catch { continue; }
+
+        if (eventName === 'error') throw new Error(evData.message || 'Server error');
+        if (eventName === 'result') { finalData = evData; continue; }
+        handleSSEEvent(eventName, evData);
+      }
+    }
+
+    if (finalData) {
+      currentResult = finalData;
+      currentSubmissionId = finalData.submission_id || null;
+      completeAllStages();
+      await sleep(400);
+      showResultsSection(finalData);
+      loadHistory();
+    }
   } catch (err) {
     showError(err.message);
   }
 }
 
+function handleSSEEvent(eventName, data) {
+  switch (eventName) {
+    case 'stage':
+      if (data.done) {
+        markStageDone(data.id, data.label);
+      } else {
+        setStage(data.id, data.label);
+      }
+      break;
+    case 'progress':
+      document.getElementById('progressSubtext').textContent = data.label || '';
+      break;
+    case 'scoring':
+      document.getElementById('progressSubtext').textContent = data.label || 'Scoring…';
+      break;
+  }
+}
+
 // ── Progress stages ──
-function setStage(stageName) {
+function setStage(stageName, labelOverride) {
   const stages = document.querySelectorAll('#pipelineStages .stage');
   let passed = false;
   stages.forEach(s => {
     const name = s.dataset.stage;
     if (name === stageName) {
       s.classList.add('active'); s.classList.remove('done'); passed = true;
-      document.getElementById('progressSubtext').textContent = s.querySelector('span').textContent + '...';
-    } else if (!passed) { s.classList.remove('active'); s.classList.add('done'); }
-    else { s.classList.remove('active', 'done'); }
+      const spanEl = s.querySelector('span');
+      const label = labelOverride || (spanEl ? spanEl.textContent : stageName);
+      document.getElementById('progressSubtext').textContent = label;
+      if (labelOverride && spanEl) spanEl.textContent = labelOverride;
+    } else if (!passed) {
+      s.classList.remove('active'); s.classList.add('done');
+    } else {
+      s.classList.remove('active', 'done');
+    }
+  });
+}
+function markStageDone(stageName, labelOverride) {
+  const stages = document.querySelectorAll('#pipelineStages .stage');
+  stages.forEach(s => {
+    if (s.dataset.stage === stageName) {
+      s.classList.remove('active'); s.classList.add('done');
+      if (labelOverride) { const sp = s.querySelector('span'); if (sp) sp.textContent = labelOverride; }
+    }
   });
 }
 function completeAllStages() {
-  document.querySelectorAll('#pipelineStages .stage').forEach(s => { s.classList.remove('active'); s.classList.add('done'); });
+  document.querySelectorAll('#pipelineStages .stage').forEach(s => {
+    s.classList.remove('active'); s.classList.add('done');
+  });
   document.getElementById('progressSubtext').textContent = 'Complete!';
 }
 
@@ -266,17 +329,18 @@ function showResultsSection(data) {
 
       const block = el('div', 'question-block');
 
-      // Question header
+      // Question header — no model name shown (moved to tech details)
       const header = el('div', 'flex items-start justify-between mb-3 gap-4');
       const providerStr = version ? esc(version.provider) : '';
-      const verifiedBadge = version && version.verified ? '<span class="badge-verified ml-1">✓ Verified</span>' : '';
-      const scoreBadge = version && version.quality_score != null
-        ? `<span class="badge-score ml-1">Score: ${version.quality_score}</span>` : '';
+      const verifiedBadge = version && version.verified
+        ? '<span class="badge-verified ml-1">✓ Verified</span>' : '';
+      const qs = version && version.quality_score != null ? version.quality_score : null;
+      const scoreBadge = qs
+        ? `<span class="badge-score${(() => { const p = qs.split('/'); return p.length === 2 && parseInt(p[0]) === parseInt(p[1]); })() ? ' badge-score-full' : ''} ml-1">🎯 ${esc(qs)}</span>`
+        : '';
       header.innerHTML = `
         <h3 class="text-base font-semibold shrink-0">Q${esc(qr.question_number)}</h3>
         <div class="flex flex-wrap items-center gap-1.5 justify-end">
-          <span class="text-xs text-zinc-500">Pipeline ${esc(qr.pipeline)}</span>
-          ${providerStr ? `<span class="badge-model">${providerStr}</span>` : ''}
           ${verifiedBadge}${scoreBadge}
         </div>
       `;
@@ -329,6 +393,20 @@ function showResultsSection(data) {
         block.appendChild(toggleBtn);
         block.appendChild(explPanel);
       }
+
+      // Technical details collapsible (hidden by default — no AI branding in main view)
+      const techBtn = el('button', 'mt-3 text-xs text-zinc-600 hover:text-zinc-400 flex items-center gap-1 transition');
+      techBtn.innerHTML = 'ℹ Technical Details';
+      const techPanel = el('div', 'hidden mt-1 p-3 rounded-lg border border-zinc-800/60 text-xs text-zinc-600 space-y-0.5');
+      techPanel.innerHTML = [
+        `<div>Pipeline: <span class="text-zinc-500">${esc(qr.pipeline)}</span></div>`,
+        providerStr ? `<div>Model: <span class="text-zinc-500">${providerStr}</span></div>` : '',
+        version.approach_label ? `<div>Style: <span class="text-zinc-500">${esc(version.approach_label)}</span></div>` : '',
+        qs ? `<div>Score: <span class="text-zinc-500">${esc(qs)}</span></div>` : '',
+      ].filter(Boolean).join('');
+      techBtn.onclick = () => techPanel.classList.toggle('hidden');
+      block.appendChild(techBtn);
+      block.appendChild(techPanel);
 
       panel.appendChild(block);
     });
@@ -502,13 +580,55 @@ function appendChatMessage(container, role, content) {
 }
 
 // ── Export functions ──
-async function exportPDF() {
+
+// PDF export now opens a modal to choose which paper versions to download
+function exportPDF() {
   if (!currentResult) return;
+  const modal = document.getElementById('exportModal');
+  const checksDiv = document.getElementById('exportVersionChecks');
+  const maxVersions = Math.max(...(currentResult.results || []).map(qr => (qr.versions || []).length), 1);
+  const styleLabels = ['Formal Academic', 'Concise', 'Natural Voice', 'Alternative Method', 'Extended Working'];
+  checksDiv.innerHTML = '';
+  for (let v = 1; v <= maxVersions; v++) {
+    const label = styleLabels[v - 1] || `Version ${v}`;
+    const row = el('label', 'flex items-center gap-2.5 cursor-pointer py-1');
+    row.innerHTML = `
+      <input type="checkbox" value="${v}" class="export-ver-check w-4 h-4 rounded accent-shark-500" checked>
+      <span class="text-sm">Paper ${v} — <span class="text-zinc-400">${label}</span></span>
+    `;
+    checksDiv.appendChild(row);
+  }
+  modal.classList.remove('hidden');
+}
+
+async function doExportPDF() {
+  const checks = Array.from(document.querySelectorAll('.export-ver-check:checked'));
+  const versions = checks.map(c => parseInt(c.value));
+  if (versions.length === 0) { showToast('Select at least one paper version', 'warn'); return; }
+  closeExportModal();
   try {
-    const resp = await fetch('/api/export/pdf', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ data: currentResult }) });
-    if (!resp.ok) throw new Error('Export failed');
-    downloadBlob(await resp.blob(), 'shark_answer_results.pdf');
+    if (versions.length === 1) {
+      const resp = await fetch('/api/export/pdf/paper', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ data: currentResult, version_number: versions[0] }),
+      });
+      if (!resp.ok) throw new Error('Export failed');
+      downloadBlob(await resp.blob(), `paper_${versions[0]}.pdf`);
+    } else {
+      const resp = await fetch('/api/export/pdf/zip', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ data: currentResult, version_numbers: versions }),
+      });
+      if (!resp.ok) throw new Error('Export failed');
+      downloadBlob(await resp.blob(), 'shark_papers.zip');
+    }
   } catch (e) { showToast('PDF export failed: ' + e.message, 'error'); }
+}
+
+function closeExportModal() {
+  document.getElementById('exportModal').classList.add('hidden');
 }
 async function exportDocx() {
   if (!currentResult) return;

@@ -23,7 +23,6 @@ from pathlib import Path
 from typing import Optional
 
 from shark_answer.config import AppConfig, Pipeline
-from shark_answer.knowledge_base.store import KnowledgeBase
 from shark_answer.modules.examiner_profile import ExaminerProfile
 from shark_answer.modules.explanation import build_explanation_prompt
 from shark_answer.pipelines.base import AnswerVersion, PipelineResult
@@ -57,6 +56,15 @@ For theory questions:
 - Write precise definitions (exactly as they'd earn marks)
 - Use [DIAGRAM: ...] for any required diagrams
 - Give examples only where the mark scheme explicitly rewards them
+
+CRITICAL LENGTH RULE — match answer length to marks allocated:
+- [1] mark: 1 sentence maximum
+- [2] marks: 2–4 lines
+- [3–4] marks: 4–8 lines
+- [5–6] marks (code/pseudocode): complete working solution, no extra explanation
+- [8–10] marks: full solution with comments where needed
+- [12–15] marks (extended): full solution + brief inline explanation
+DO NOT pad. Write only what earns marks.
 
 Answer style: {answer_style}
 
@@ -99,7 +107,7 @@ async def run_pipeline_c(
     registry: ProviderRegistry,
     config: AppConfig,
     cost_tracker: CostTracker,
-    knowledge_base: Optional[KnowledgeBase] = None,
+    kb_context: str = "",
     examiner_profile: Optional[ExaminerProfile] = None,
     language: str = "en",
     max_versions: int = 5,
@@ -111,11 +119,8 @@ async def run_pipeline_c(
         subject=subject,
     )
 
-    marking_context = ""
-    if knowledge_base:
-        marking_context = knowledge_base.get_marking_context(
-            subject, question.topic_hints[0] if question.topic_hints else ""
-        )
+    # kb_context is pre-built by the caller (app.py) via knowledge_base.retriever
+    marking_context = kb_context
 
     examiner_guidance = ""
     if examiner_profile:

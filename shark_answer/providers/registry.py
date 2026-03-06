@@ -126,7 +126,10 @@ class ProviderRegistry:
         temperature: float = 0.7,
         max_tokens: int = 4096,
     ) -> list[ModelResponse]:
-        """Call multiple models in parallel, return all responses (including failures)."""
+        """Call multiple models in parallel, return all responses (including failures).
+
+        Each model gets up to 2 attempts: 30 s timeout per attempt, 5 s delay between.
+        """
         sem = asyncio.Semaphore(self.config.max_concurrent_models)
 
         async def _call(p: ModelProvider) -> ModelResponse:
@@ -137,10 +140,45 @@ class ProviderRegistry:
                         content="", provider=p.value, model_name="",
                         success=False, error="Provider not configured",
                     )
-                return await inst.generate(
-                    prompt=prompt, system=system,
-                    temperature=temperature, max_tokens=max_tokens,
+                last: ModelResponse = ModelResponse(
+                    content="", provider=p.value,
+                    model_name=getattr(inst, "model_name", ""),
+                    success=False, error="All attempts failed",
                 )
+                for attempt in range(2):
+                    logger.info("[%s] Calling (attempt %d)...", p.value, attempt + 1)
+                    try:
+                        last = await asyncio.wait_for(
+                            inst.generate(
+                                prompt=prompt, system=system,
+                                temperature=temperature, max_tokens=max_tokens,
+                            ),
+                            timeout=30.0,
+                        )
+                        if last.success:
+                            in_tok  = last.usage.input_tokens  if last.usage else 0
+                            out_tok = last.usage.output_tokens if last.usage else 0
+                            logger.info(
+                                "[%s] OK (attempt %d) — %d in / %d out tokens",
+                                p.value, attempt + 1, in_tok, out_tok,
+                            )
+                            return last
+                        logger.warning(
+                            "[%s] Error (attempt %d): %s", p.value, attempt + 1, last.error
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "[%s] Timeout after 30 s (attempt %d)", p.value, attempt + 1
+                        )
+                        last = ModelResponse(
+                            content="", provider=p.value,
+                            model_name=getattr(inst, "model_name", ""),
+                            success=False, error="Timeout after 30 s",
+                        )
+                    if attempt == 0:
+                        logger.info("[%s] Retrying in 5 s...", p.value)
+                        await asyncio.sleep(5.0)
+                return last
 
         results = await asyncio.gather(*[_call(p) for p in providers])
         return list(results)
@@ -154,7 +192,10 @@ class ProviderRegistry:
         temperature: float = 0.3,
         max_tokens: int = 4096,
     ) -> list[ModelResponse]:
-        """Call multiple models with an image in parallel."""
+        """Call multiple models with an image in parallel.
+
+        Each model gets up to 2 attempts: 30 s timeout per attempt, 5 s delay between.
+        """
         sem = asyncio.Semaphore(self.config.max_concurrent_models)
 
         async def _call(p: ModelProvider) -> ModelResponse:
@@ -165,11 +206,46 @@ class ProviderRegistry:
                         content="", provider=p.value, model_name="",
                         success=False, error="Provider not configured",
                     )
-                return await inst.generate_with_image(
-                    prompt=prompt, image_data=image_data,
-                    system=system, temperature=temperature,
-                    max_tokens=max_tokens,
+                last: ModelResponse = ModelResponse(
+                    content="", provider=p.value,
+                    model_name=getattr(inst, "model_name", ""),
+                    success=False, error="All attempts failed",
                 )
+                for attempt in range(2):
+                    logger.info(
+                        "[%s] Calling with image (attempt %d)...", p.value, attempt + 1
+                    )
+                    try:
+                        last = await asyncio.wait_for(
+                            inst.generate_with_image(
+                                prompt=prompt, image_data=image_data,
+                                system=system, temperature=temperature,
+                                max_tokens=max_tokens,
+                            ),
+                            timeout=30.0,
+                        )
+                        if last.success:
+                            logger.info(
+                                "[%s] Image OK (attempt %d)", p.value, attempt + 1
+                            )
+                            return last
+                        logger.warning(
+                            "[%s] Image error (attempt %d): %s",
+                            p.value, attempt + 1, last.error,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "[%s] Image timeout after 30 s (attempt %d)", p.value, attempt + 1
+                        )
+                        last = ModelResponse(
+                            content="", provider=p.value,
+                            model_name=getattr(inst, "model_name", ""),
+                            success=False, error="Timeout after 30 s",
+                        )
+                    if attempt == 0:
+                        logger.info("[%s] Retrying in 5 s...", p.value)
+                        await asyncio.sleep(5.0)
+                return last
 
         results = await asyncio.gather(*[_call(p) for p in providers])
         return list(results)

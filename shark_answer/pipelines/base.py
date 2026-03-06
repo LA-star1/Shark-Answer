@@ -17,7 +17,7 @@ class AnswerVersion:
     approach_label: str = ""       # e.g., "Energy conservation method"
     provider: str = ""             # which model generated it
     verified: bool = False         # True if computationally verified (Pipeline A)
-    quality_score: Optional[float] = None  # 0-100, set by judge
+    quality_score: Optional[str] = None    # e.g. "14/15", set by scoring loop
     language: str = "en"
 
 

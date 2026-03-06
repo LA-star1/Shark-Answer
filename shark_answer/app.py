@@ -8,10 +8,11 @@ import logging
 import re
 import time
 import uuid
+import zipfile
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
-from typing import Optional
+from typing import AsyncGenerator, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,7 +24,7 @@ from pydantic import BaseModel
 from shark_answer.config import (
     AppConfig, Language, Pipeline, Subject, SUBJECT_PIPELINE_MAP,
 )
-from shark_answer.knowledge_base.store import KnowledgeBase
+from shark_answer.knowledge_base.retriever import build_prompt_context
 from shark_answer.modules.examiner_profile import ExaminerProfileManager
 from shark_answer.pipelines.base import PipelineResult
 from shark_answer.pipelines.pipeline_a_science import run_pipeline_a
@@ -44,7 +45,6 @@ logger = logging.getLogger(__name__)
 # Global state
 _config: Optional[AppConfig] = None
 _registry: Optional[ProviderRegistry] = None
-_knowledge_base: Optional[KnowledgeBase] = None
 _examiner_manager: Optional[ExaminerProfileManager] = None
 _cost_tracker: Optional[CostTracker] = None
 
@@ -53,6 +53,9 @@ _history: list[dict] = []
 
 # Chat history: key = "submission_id:question_number", value = list of messages
 _chat_histories: dict[str, list[dict]] = {}
+
+# Last-run log for /api/debug/last-run
+_last_run_log: dict = {}
 
 # Template and static paths
 _BASE_DIR = Path(__file__).parent
@@ -63,13 +66,12 @@ _STATIC_DIR = _BASE_DIR / "static"
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize application state on startup."""
-    global _config, _registry, _knowledge_base, _examiner_manager, _cost_tracker
+    global _config, _registry, _examiner_manager, _cost_tracker
 
     _config = AppConfig.from_env()
     logging.basicConfig(level=getattr(logging, _config.log_level))
 
     _registry = ProviderRegistry(_config)
-    _knowledge_base = KnowledgeBase(_config.mark_scheme_dir)
     _examiner_manager = ExaminerProfileManager(_config.examiner_profile_dir)
     _cost_tracker = CostTracker(budget_warning_usd=_config.cost_budget_warning_usd)
 
@@ -114,7 +116,7 @@ class AnswerVersionOut(BaseModel):
     approach_label: str
     provider: str
     verified: bool
-    quality_score: Optional[float] = None
+    quality_score: Optional[str] = None   # e.g. "14/15"
     language: str
 
 
@@ -163,6 +165,207 @@ class ChatResponse(BaseModel):
 
 
 # ===========================================================
+# Scoring & revision prompts
+# ===========================================================
+
+SCORE_SYSTEM = """You are a CIE A-Level examiner scoring a student answer against the mark scheme.
+
+Output ONLY valid JSON with this exact structure (no markdown fences):
+{
+  "marks_achieved": <integer>,
+  "total_marks": <integer>,
+  "verdict": "full" | "partial" | "poor",
+  "missing_points": ["specific mark point not yet addressed", ...]
+}
+
+Rules:
+- verdict is "full"    if marks_achieved == total_marks
+- verdict is "partial" if marks_achieved >= ceil(total_marks * 0.7)
+- verdict is "poor"    otherwise
+- missing_points lists specific CIE mark-scheme criteria NOT yet addressed (empty list when verdict=="full")"""
+
+REVISE_SYSTEM = """You are a top CIE A-Level student improving your exam answer to earn the missing marks indicated by the examiner.
+
+Rewrite the COMPLETE answer incorporating the missing points. Keep the same style and approximate length.
+Write ONLY the improved answer — no preamble, no "Here is the revised..." header, no commentary."""
+
+
+async def _score_and_revise(
+    question_text: str,
+    marks: int,
+    answer_text: str,
+    subject: str,
+    language: str = "en",
+) -> tuple[str, str]:
+    """Score an answer with Claude and revise up to 3 rounds.
+
+    Returns (best_answer_text, score_str) where score_str is e.g. "14/15".
+    Falls back gracefully if Claude is unavailable.
+    """
+    if not _registry or not _cost_tracker:
+        return answer_text, f"?/{marks}"
+
+    from shark_answer.config import ModelProvider
+    scorer = _registry.get(ModelProvider.CLAUDE)
+    if not scorer:
+        return answer_text, f"?/{marks}"
+
+    best_answer = answer_text
+    best_achieved = 0
+    score_str = f"?/{marks}"
+    lang_note = " (Answer is in Chinese — evaluate accordingly.)" if language == "zh" else ""
+
+    for round_num in range(3):
+        score_prompt = (
+            f"Question [{marks} marks]:\n{question_text}\n\n"
+            f"Student answer:{lang_note}\n{best_answer}"
+        )
+        try:
+            score_resp = await scorer.generate(
+                prompt=score_prompt,
+                system=SCORE_SYSTEM,
+                temperature=0.1,
+                max_tokens=512,
+            )
+            _cost_tracker.record(score_resp, subject, "scoring")
+        except Exception:
+            break
+
+        if not score_resp.success:
+            break
+
+        try:
+            raw = score_resp.content
+            start = raw.find("{")
+            end = raw.rfind("}") + 1
+            if start < 0 or end <= start:
+                break
+            score_data = json.loads(raw[start:end])
+            achieved = int(score_data.get("marks_achieved", 0))
+            total    = int(score_data.get("total_marks", marks))
+            verdict  = score_data.get("verdict", "partial")
+            missing  = score_data.get("missing_points", [])
+
+            if achieved > best_achieved:
+                best_achieved = achieved
+                score_str = f"{achieved}/{total}"
+
+            if verdict == "full" or not missing or round_num == 2:
+                break   # done — full marks or nothing left to improve
+
+            # Revise
+            lang_suffix = "\n\nWrite in Chinese (简体中文)." if language == "zh" else ""
+            revise_prompt = (
+                f"Question [{marks} marks]:\n{question_text}\n\n"
+                f"Your current answer:\n{best_answer}\n\n"
+                f"Examiner feedback — missing mark points:\n"
+                + "\n".join(f"• {p}" for p in missing)
+                + f"\n\nRewrite to earn these missing marks.{lang_suffix}"
+            )
+            try:
+                revise_resp = await scorer.generate(
+                    prompt=revise_prompt,
+                    system=REVISE_SYSTEM,
+                    temperature=0.3,
+                    max_tokens=4096,
+                )
+                _cost_tracker.record(revise_resp, subject, "revision")
+            except Exception:
+                break
+
+            if revise_resp.success and revise_resp.content.strip():
+                best_answer = revise_resp.content
+
+        except (json.JSONDecodeError, ValueError, KeyError):
+            break
+
+    return best_answer, score_str
+
+
+# ===========================================================
+# Pipeline dispatch helper (shared by /api/solve and /api/solve/stream)
+# ===========================================================
+
+async def _run_pipeline(
+    q,
+    pipeline,
+    subject: str,
+    lang,
+    max_versions: int,
+    profile,
+    paper_number: Optional[int] = None,
+) -> "PipelineResult":
+    """Dispatch a single question to the appropriate pipeline.
+
+    kb_context is fetched once here and passed into the pipeline so every
+    model call in the pipeline automatically gets the relevant mark schemes,
+    examiner reports, grade thresholds, and syllabus as context.
+    """
+    kb_context = build_prompt_context(subject=subject, paper_number=paper_number)
+
+    if pipeline == Pipeline.SCIENCE_MATH:
+        return await run_pipeline_a(
+            question=q, subject=subject, registry=_registry,
+            config=_config, cost_tracker=_cost_tracker,
+            kb_context=kb_context,
+            examiner_profile=profile,
+            language=lang.value, max_versions=max_versions,
+        )
+    elif pipeline == Pipeline.ESSAY:
+        return await run_pipeline_b(
+            question=q, subject=subject, registry=_registry,
+            config=_config, cost_tracker=_cost_tracker,
+            kb_context=kb_context,
+            examiner_profile=profile,
+            language=lang.value, max_versions=max_versions,
+        )
+    elif pipeline == Pipeline.CS:
+        return await run_pipeline_c(
+            question=q, subject=subject, registry=_registry,
+            config=_config, cost_tracker=_cost_tracker,
+            kb_context=kb_context,
+            examiner_profile=profile,
+            language=lang.value, max_versions=max_versions,
+        )
+    else:
+        from shark_answer.pipelines.base import PipelineResult as PR
+        return PR(
+            question=q, pipeline=pipeline.value, subject=subject,
+            errors=[f"Pipeline {pipeline.value} not implemented"],
+        )
+
+
+def _build_question_results(results: list) -> list[QuestionResultOut]:
+    """Convert PipelineResult list → QuestionResultOut list."""
+    out = []
+    for pr in results:
+        versions_out = [
+            AnswerVersionOut(
+                version_number=v.version_number,
+                answer_text=v.answer_text,
+                explanation_text=v.explanation_text,
+                approach_label=v.approach_label,
+                provider=v.provider,
+                verified=v.verified,
+                quality_score=v.quality_score,
+                language=v.language,
+            )
+            for v in pr.versions
+        ]
+        out.append(QuestionResultOut(
+            question_number=pr.question.number,
+            question_text=pr.question.text,
+            pipeline=pr.pipeline,
+            subject=pr.subject,
+            versions=versions_out,
+            verification_notes=pr.verification_notes,
+            disagreement_resolved=pr.disagreement_resolved,
+            errors=pr.errors,
+        ))
+    return out
+
+
+# ===========================================================
 # Frontend routes
 # ===========================================================
 
@@ -198,6 +401,7 @@ async def solve_exam_paper(
     Accepted file types: JPG, PNG, WEBP, HEIC, PDF, DOCX.
     PDFs are split into one image per page; DOCX text and images are extracted.
     """
+    global _last_run_log
     if not _config or not _registry or not _cost_tracker:
         raise HTTPException(500, "Server not initialized")
 
@@ -211,6 +415,7 @@ async def solve_exam_paper(
 
     lang = Language.ZH if language == "zh" else Language.EN
     max_versions = max(1, min(5, max_versions))
+    _last_run_log = {"started": time.strftime("%Y-%m-%d %H:%M:%S"), "subject": subject, "stages": []}
 
     # Read and convert all uploaded files to image bytes
     image_data_list: list[bytes] = []
@@ -221,7 +426,6 @@ async def solve_exam_paper(
             raise HTTPException(400, f"Empty file: {upload.filename}")
         fname = upload.filename or "unknown"
         filenames.append(fname)
-
         converted = convert_file_to_images(fname, raw_data)
         if not converted:
             logger.warning("Could not convert file '%s'; skipping.", fname)
@@ -229,23 +433,16 @@ async def solve_exam_paper(
         image_data_list.extend(converted)
 
     if not image_data_list:
-        raise HTTPException(
-            422,
-            "No usable image content could be extracted from the uploaded files.",
-        )
+        raise HTTPException(422, "No usable image content could be extracted from the uploaded files.")
 
     # Step 1: Extract questions via AI vision
-    logger.info("Extracting questions from %d image(s) for subject '%s'",
-                len(image_data_list), subject)
-    questions, extract_responses = await extract_questions_from_images(
-        _registry, image_data_list,
-    )
+    logger.info("Extracting questions from %d image(s) for subject '%s'", len(image_data_list), subject)
+    questions, extract_responses = await extract_questions_from_images(_registry, image_data_list)
     _cost_tracker.record_batch(extract_responses, subject, "extraction")
+    _last_run_log["stages"].append({"stage": "extract", "questions": len(questions)})
 
     if not questions:
-        raise HTTPException(
-            422, "Could not extract any questions from the uploaded files",
-        )
+        raise HTTPException(422, "Could not extract any questions from the uploaded files")
 
     # Step 2: Load examiner profile
     profile = None
@@ -260,70 +457,40 @@ async def solve_exam_paper(
         pipeline = route_question(q, subject_enum)
         logger.info("Processing Q%s via Pipeline %s", q.number, pipeline.value)
         try:
-            if pipeline == Pipeline.SCIENCE_MATH:
-                pr = await run_pipeline_a(
-                    question=q, subject=subject, registry=_registry,
-                    config=_config, cost_tracker=_cost_tracker,
-                    knowledge_base=_knowledge_base,
-                    examiner_profile=profile,
-                    language=lang.value, max_versions=max_versions,
-                )
-            elif pipeline == Pipeline.ESSAY:
-                pr = await run_pipeline_b(
-                    question=q, subject=subject, registry=_registry,
-                    config=_config, cost_tracker=_cost_tracker,
-                    knowledge_base=_knowledge_base,
-                    examiner_profile=profile,
-                    language=lang.value, max_versions=max_versions,
-                )
-            elif pipeline == Pipeline.CS:
-                pr = await run_pipeline_c(
-                    question=q, subject=subject, registry=_registry,
-                    config=_config, cost_tracker=_cost_tracker,
-                    knowledge_base=_knowledge_base,
-                    examiner_profile=profile,
-                    language=lang.value, max_versions=max_versions,
-                )
-            else:
-                pr = PipelineResult(
-                    question=q, pipeline=pipeline.value, subject=subject,
-                    errors=[f"Pipeline {pipeline.value} not implemented"],
-                )
+            pr = await _run_pipeline(q, pipeline, subject, lang, max_versions, profile)
             results.append(pr)
         except Exception as e:
             logger.exception("Error processing Q%s", q.number)
             results.append(PipelineResult(
-                question=q, pipeline=pipeline.value, subject=subject,
-                errors=[str(e)],
+                question=q, pipeline=pipeline.value, subject=subject, errors=[str(e)],
             ))
 
-    # Build response
-    question_results = []
-    for pr in results:
-        versions_out = [
-            AnswerVersionOut(
-                version_number=v.version_number,
-                answer_text=v.answer_text,
-                explanation_text=v.explanation_text,
-                approach_label=v.approach_label,
-                provider=v.provider,
-                verified=v.verified,
-                quality_score=v.quality_score,
-                language=v.language,
-            )
-            for v in pr.versions
-        ]
-        question_results.append(QuestionResultOut(
-            question_number=pr.question.number,
-            question_text=pr.question.text,
-            pipeline=pr.pipeline,
-            subject=pr.subject,
-            versions=versions_out,
-            verification_notes=pr.verification_notes,
-            disagreement_resolved=pr.disagreement_resolved,
-            errors=pr.errors,
-        ))
+    responding = sum(1 for pr in results if pr.versions)
+    _last_run_log["stages"].append({
+        "stage": "solve", "questions": len(questions), "with_answers": responding,
+    })
 
+    # Step 4: Score and revise each answer version
+    for pr in results:
+        for v in pr.versions:
+            try:
+                new_text, score_str = await _score_and_revise(
+                    question_text=pr.question.text,
+                    marks=pr.question.marks,
+                    answer_text=v.answer_text,
+                    subject=subject,
+                    language=lang.value,
+                )
+                v.answer_text = new_text
+                v.quality_score = score_str
+            except Exception as exc:
+                logger.warning("Scoring failed for Q%s V%s: %s", pr.question.number, v.version_number, exc)
+
+    _last_run_log["stages"].append({"stage": "score", "done": True})
+    _last_run_log["completed"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+    # Build response
+    question_results = _build_question_results(results)
     paper_result = PaperResultOut(
         total_questions=len(questions),
         results=question_results,
@@ -343,6 +510,212 @@ async def solve_exam_paper(
     })
 
     return paper_result
+
+
+# ===========================================================
+# SSE streaming solve endpoint
+# ===========================================================
+
+@app.post("/api/solve/stream")
+async def solve_exam_paper_stream(
+    images: list[UploadFile] = File(..., description="Exam paper files (images/PDF/DOCX)"),
+    subject: str = Form(..., description="Subject"),
+    language: str = Form("en", description="Output language: en or zh"),
+    examiner_profile: str = Form("", description="Examiner profile name (optional)"),
+    max_versions: int = Form(5, description="Max answer versions per question (1-5)"),
+):
+    """SSE streaming version of /api/solve — yields real-time progress events.
+
+    Event types: stage, progress, scoring, scored, result, error
+    """
+    if not _config or not _registry or not _cost_tracker:
+        raise HTTPException(500, "Server not initialized")
+
+    try:
+        subject_enum = Subject(subject)
+    except ValueError:
+        raise HTTPException(400, f"Invalid subject: {subject}. Valid: {[s.value for s in Subject]}")
+
+    lang = Language.ZH if language == "zh" else Language.EN
+    max_versions = max(1, min(5, max_versions))
+
+    # Read all files upfront — must finish before StreamingResponse starts
+    image_data_list: list[bytes] = []
+    filenames: list[str] = []
+    for upload in images:
+        raw_data = await upload.read()
+        if not raw_data:
+            raise HTTPException(400, f"Empty file: {upload.filename}")
+        fname = upload.filename or "unknown"
+        filenames.append(fname)
+        converted = convert_file_to_images(fname, raw_data)
+        if converted:
+            image_data_list.extend(converted)
+
+    if not image_data_list:
+        raise HTTPException(422, "No usable image content could be extracted.")
+
+    profile_name = examiner_profile
+    return StreamingResponse(
+        _solve_sse_generator(
+            image_data_list, filenames, subject_enum, lang,
+            max_versions, profile_name, subject,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+async def _solve_sse_generator(
+    image_data_list: list[bytes],
+    filenames: list[str],
+    subject_enum,
+    lang,
+    max_versions: int,
+    profile_name: str,
+    subject: str,
+) -> AsyncGenerator[str, None]:
+    """Async generator that yields SSE-formatted strings during the solve pipeline."""
+    global _last_run_log
+
+    def sse(event_name: str, data: dict) -> str:
+        return f"event: {event_name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+    _last_run_log = {"started": time.strftime("%Y-%m-%d %H:%M:%S"), "subject": subject, "stages": []}
+
+    try:
+        # ── Stage: extract ──
+        yield sse("stage", {"id": "extract", "label": "Extracting questions via AI vision...", "done": False})
+        questions, extract_responses = await extract_questions_from_images(_registry, image_data_list)
+        _cost_tracker.record_batch(extract_responses, subject, "extraction")
+        _last_run_log["stages"].append({"stage": "extract", "questions": len(questions)})
+
+        if not questions:
+            yield sse("error", {"message": "Could not extract any questions from the uploaded files"})
+            return
+
+        yield sse("stage", {
+            "id": "extract",
+            "label": f"Extracted {len(questions)} question(s) ✓",
+            "done": True,
+        })
+
+        # Load profile
+        profile = None
+        if profile_name and _examiner_manager:
+            profile = _examiner_manager.get_profile(profile_name) or _examiner_manager.get_profile_for_subject(subject)
+
+        # ── Stage: solve ──
+        yield sse("stage", {
+            "id": "solve",
+            "label": f"Solving {len(questions)} question(s) across all models...",
+            "done": False,
+        })
+
+        results: list[PipelineResult] = []
+        for i, q in enumerate(questions):
+            yield sse("progress", {
+                "question": i + 1,
+                "total": len(questions),
+                "label": f"Solving Q{q.number} ({q.marks} marks)…",
+            })
+            pipeline = route_question(q, subject_enum)
+            try:
+                pr = await _run_pipeline(q, pipeline, subject, lang, max_versions, profile)
+            except Exception as e:
+                logger.exception("Error processing Q%s", q.number)
+                pr = PipelineResult(
+                    question=q, pipeline=pipeline.value, subject=subject, errors=[str(e)],
+                )
+            results.append(pr)
+
+        responding = sum(1 for pr in results if pr.versions)
+        _last_run_log["stages"].append({
+            "stage": "solve", "questions": len(questions), "with_answers": responding,
+        })
+        yield sse("stage", {
+            "id": "solve",
+            "label": f"Solved {len(questions)} question(s) — models responding: {responding}/{len(questions)} ✓",
+            "done": True,
+        })
+
+        # ── Stage: score ──
+        total_versions = sum(len(pr.versions) for pr in results)
+        yield sse("stage", {
+            "id": "score",
+            "label": f"Scoring {total_versions} answer version(s)…",
+            "done": False,
+        })
+
+        scored = 0
+        for pr in results:
+            for v in pr.versions:
+                yield sse("scoring", {
+                    "question": pr.question.number,
+                    "version": v.version_number,
+                    "label": f"Scoring Q{pr.question.number} V{v.version_number}…",
+                })
+                try:
+                    new_text, score_str = await _score_and_revise(
+                        question_text=pr.question.text,
+                        marks=pr.question.marks,
+                        answer_text=v.answer_text,
+                        subject=subject,
+                        language=lang.value,
+                    )
+                    v.answer_text = new_text
+                    v.quality_score = score_str
+                except Exception as exc:
+                    logger.warning("Scoring Q%s V%s: %s", pr.question.number, v.version_number, exc)
+                    score_str = f"?/{pr.question.marks}"
+                    v.quality_score = score_str
+                scored += 1
+                yield sse("scored", {
+                    "question": pr.question.number,
+                    "version": v.version_number,
+                    "score": score_str,
+                })
+
+        _last_run_log["stages"].append({"stage": "score", "versions_scored": scored})
+        yield sse("stage", {"id": "score", "label": f"Scoring complete — {scored} version(s) scored ✓", "done": True})
+
+        # ── Stage: finalize ──
+        yield sse("stage", {"id": "finalize", "label": "Building final results…", "done": False})
+
+        question_results = _build_question_results(results)
+        paper_result = PaperResultOut(
+            total_questions=len(questions),
+            results=question_results,
+            cost_summary=_cost_tracker.summary(),
+        )
+
+        sid = str(uuid.uuid4())[:8]
+        _history.append({
+            "id": sid,
+            "subject": subject,
+            "language": lang.value,
+            "filenames": filenames,
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "total_questions": paper_result.total_questions,
+            "data": paper_result.model_dump(),
+        })
+
+        _last_run_log["completed"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        _last_run_log["submission_id"] = sid
+
+        yield sse("stage", {"id": "finalize", "label": "Complete ✓", "done": True})
+
+        result_data = paper_result.model_dump()
+        result_data["submission_id"] = sid
+        yield sse("result", result_data)
+
+    except Exception as e:
+        logger.exception("SSE solve failed")
+        yield sse("error", {"message": str(e)})
 
 
 @app.get("/api/history")
@@ -609,6 +982,53 @@ async def export_xlsx(request: Request):
 # Remaining API endpoints
 # ===========================================================
 
+@app.post("/api/export/pdf/paper")
+async def export_pdf_paper(request: Request):
+    """Export a single paper version as a clean student answer booklet PDF.
+
+    Body: {data: PaperResultOut, version_number: int}
+    """
+    body = await request.json()
+    data = body.get("data")
+    version_number = int(body.get("version_number", 1))
+    if not data:
+        raise HTTPException(400, "Missing data")
+    subject = (data.get("results", [{}])[0].get("subject", "paper") if data.get("results") else "paper")
+    pdf_bytes = _generate_paper_pdf(data, version_number, subject)
+    filename = f"paper_{version_number}.pdf"
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+@app.post("/api/export/pdf/zip")
+async def export_pdf_zip(request: Request):
+    """Export multiple paper versions as a ZIP of individual PDFs.
+
+    Body: {data: PaperResultOut, version_numbers: [1, 2, 3]}
+    """
+    body = await request.json()
+    data = body.get("data")
+    version_numbers: list[int] = [int(v) for v in body.get("version_numbers", [1])]
+    if not data:
+        raise HTTPException(400, "Missing data")
+    subject = (data.get("results", [{}])[0].get("subject", "paper") if data.get("results") else "paper")
+
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for vn in version_numbers:
+            pdf_bytes = _generate_paper_pdf(data, vn, subject)
+            zf.writestr(f"paper_{vn}.pdf", pdf_bytes)
+    zip_buf.seek(0)
+    return StreamingResponse(
+        zip_buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=shark_papers.zip"},
+    )
+
+
 @app.post("/api/practical/predict")
 async def predict_practical(
     image: Optional[UploadFile] = File(None),
@@ -724,6 +1144,12 @@ async def health():
         "models_configured": configured,
         "total_cost": _cost_tracker.total_cost if _cost_tracker else 0,
     }
+
+
+@app.get("/api/debug/last-run")
+async def debug_last_run():
+    """Return a log of the most recent /api/solve or /api/solve/stream run."""
+    return _last_run_log
 
 
 @app.get("/api/debug/models")
@@ -1040,6 +1466,113 @@ def _try_register_unicode_font() -> str:
             except Exception:
                 continue
     return 'Helvetica'
+
+
+# ---- Per-paper student answer booklet PDF ----
+
+def _generate_paper_pdf(data: dict, version_number: int, subject: str) -> bytes:
+    """Generate a clean student answer booklet PDF for a single paper version.
+
+    No model names, no version style labels — just a clean answer sheet
+    with subject header, paper number, sequential questions, and page numbers.
+    """
+    import datetime
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
+
+    body_font = _try_register_unicode_font()
+
+    total_versions = max(
+        (len(qr.get("versions", [])) for qr in data.get("results", [])),
+        default=1,
+    )
+    date_str = datetime.date.today().strftime("%B %Y")
+    subject_display = subject.replace("_", " ").title()
+
+    buf = io.BytesIO()
+
+    def _add_page_number(canvas, doc):
+        canvas.saveState()
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillGray(0.55)
+        canvas.drawCentredString(A4[0] / 2, 10 * mm, str(doc.page))
+        canvas.restoreState()
+
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4,
+        leftMargin=25 * mm, rightMargin=20 * mm,
+        topMargin=20 * mm, bottomMargin=22 * mm,
+    )
+
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(
+        "PH1", parent=styles["Normal"],
+        fontSize=15, fontName=body_font,
+        spaceAfter=2, alignment=TA_CENTER,
+        textColor=colors.black,
+    ))
+    styles.add(ParagraphStyle(
+        "PH2", parent=styles["Normal"],
+        fontSize=9, fontName=body_font,
+        spaceAfter=8, alignment=TA_CENTER,
+        textColor=colors.HexColor("#555555"),
+    ))
+    styles.add(ParagraphStyle(
+        "QL", parent=styles["Normal"],
+        fontSize=11, fontName=body_font,
+        spaceBefore=14, spaceAfter=3,
+        textColor=colors.black,
+    ))
+    styles.add(ParagraphStyle(
+        "QT", parent=styles["Normal"],
+        fontSize=9, fontName=body_font,
+        spaceAfter=5, leftIndent=10,
+        textColor=colors.HexColor("#555555"),
+    ))
+    styles.add(ParagraphStyle(
+        "AB", parent=styles["Normal"],
+        fontSize=11, leading=18, fontName=body_font,
+        spaceAfter=8,
+        textColor=colors.black,
+    ))
+
+    story: list = []
+    story.append(Paragraph(_pdf_safe(subject_display), styles["PH1"]))
+    story.append(Paragraph(
+        f"Paper {version_number} of {total_versions} &nbsp;&middot;&nbsp; {date_str}",
+        styles["PH2"],
+    ))
+    story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#cccccc")))
+    story.append(Spacer(1, 6 * mm))
+
+    for qr in data.get("results", []):
+        versions = qr.get("versions", [])
+        if not versions:
+            continue
+        # Pick the requested version index; fallback to last available
+        v = (
+            versions[version_number - 1]
+            if version_number - 1 < len(versions)
+            else versions[-1]
+        )
+        q_num = qr.get("question_number", "?")
+        q_text = qr.get("question_text", "")
+
+        story.append(Paragraph(_pdf_safe(f"Question {q_num}"), styles["QL"]))
+        if q_text:
+            story.append(Paragraph(_pdf_safe(q_text).replace("\n", "<br/>"), styles["QT"]))
+        story.append(Spacer(1, 2 * mm))
+
+        answer_text = v.get("answer_text", "(No answer generated)")
+        story.append(Paragraph(_pdf_safe(answer_text).replace("\n", "<br/>"), styles["AB"]))
+        story.append(Spacer(1, 4 * mm))
+
+    doc.build(story, onFirstPage=_add_page_number, onLaterPages=_add_page_number)
+    return buf.getvalue()
 
 
 # ---- PDF export ----

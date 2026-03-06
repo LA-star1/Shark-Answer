@@ -1,0 +1,54 @@
+[
+  {
+    "subject_key": "economics",
+    "manifest_key": "economics_9708",
+    "qp_file": "2024_june_qp_21.pdf",
+    "ms_file": "2024_june_ms_21.pdf",
+    "paper_number": 21,
+    "total_marks": 0,
+    "total_achieved": 0,
+    "score_pct": 0.0,
+    "grade": "U",
+    "cost_usd": 0.10438,
+    "timing_s": {
+      "extraction": 76.6,
+      "solving": 508.89,
+      "scoring": 50.6
+    },
+    "error": "",
+    "questions": [
+      {
+        "number": "1(a)(i)",
+        "marks_total": 1,
+        "marks_achieved": 0,
+        "score_str": "FAILED/1",
+        "grade_estimate": "SCORE_FAILED",
+        "pipeline": "B",
+        "timing_s": 250.8,
+        "providers_ok": [
+          "gemini"
+        ],
+        "providers_fail": [],
+        "errors": [
+          "SCORE_FAILED after 3 attempts: Model error: Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.'}, 'request_id': 'req_011CYm2iRWtipSo3qywjJMeM'}"
+        ]
+      },
+      {
+        "number": "1(a)(ii)",
+        "marks_total": 1,
+        "marks_achieved": 0,
+        "score_str": "FAILED/1",
+        "grade_estimate": "SCORE_FAILED",
+        "pipeline": "B",
+        "timing_s": 308.69,
+        "providers_ok": [
+          "gemini"
+        ],
+        "providers_fail": [],
+        "errors": [
+          "SCORE_FAILED after 3 attempts: Model error: Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.'}, 'request_id': 'req_011CYm37BKGH4VpXkthaqHg2'}"
+        ]
+      }
+    ]
+  }
+]

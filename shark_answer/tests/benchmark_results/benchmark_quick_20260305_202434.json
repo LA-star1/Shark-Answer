@@ -1,0 +1,98 @@
+[
+  {
+    "subject_key": "economics",
+    "manifest_key": "economics_9708",
+    "qp_file": "2024_june_qp_21.pdf",
+    "ms_file": "2024_june_ms_21.pdf",
+    "paper_number": 21,
+    "total_marks": 1,
+    "total_achieved": 1,
+    "score_pct": 100.0,
+    "grade": "A*",
+    "cost_usd": 1.88619,
+    "timing_s": {
+      "extraction": 63.97,
+      "solving": 201.95,
+      "scoring": 4.54
+    },
+    "error": "",
+    "questions": [
+      {
+        "number": "1",
+        "marks_total": 0,
+        "marks_achieved": 0,
+        "score_str": "0/0",
+        "grade_estimate": "A*",
+        "pipeline": "B",
+        "timing_s": 114.37,
+        "providers_ok": [
+          "claude"
+        ],
+        "providers_fail": [],
+        "errors": []
+      },
+      {
+        "number": "1(a)(i)",
+        "marks_total": 1,
+        "marks_achieved": 1,
+        "score_str": "1/1",
+        "grade_estimate": "A*",
+        "pipeline": "B",
+        "timing_s": 92.12,
+        "providers_ok": [
+          "claude"
+        ],
+        "providers_fail": [],
+        "errors": []
+      }
+    ]
+  },
+  {
+    "subject_key": "physics",
+    "manifest_key": "physics_9702",
+    "qp_file": "2024_june_qp_21.pdf",
+    "ms_file": "2024_june_ms_21.pdf",
+    "paper_number": 21,
+    "total_marks": 3,
+    "total_achieved": 0,
+    "score_pct": 0.0,
+    "grade": "U",
+    "cost_usd": 2.20325,
+    "timing_s": {
+      "extraction": 197.34,
+      "solving": 159.75,
+      "scoring": 7.27
+    },
+    "error": "",
+    "questions": [
+      {
+        "number": "1",
+        "marks_total": 0,
+        "marks_achieved": 0,
+        "score_str": "0/0",
+        "grade_estimate": "A*",
+        "pipeline": "A",
+        "timing_s": 80.5,
+        "providers_ok": [
+          "o3pro"
+        ],
+        "providers_fail": [],
+        "errors": []
+      },
+      {
+        "number": "1(a)",
+        "marks_total": 3,
+        "marks_achieved": 0,
+        "score_str": "0/3",
+        "grade_estimate": "U",
+        "pipeline": "A",
+        "timing_s": 86.53,
+        "providers_ok": [
+          "claude"
+        ],
+        "providers_fail": [],
+        "errors": []
+      }
+    ]
+  }
+]

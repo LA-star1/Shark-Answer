@@ -22,7 +22,6 @@ import logging
 from typing import Optional
 
 from shark_answer.config import AppConfig, ModelProvider, Pipeline
-from shark_answer.knowledge_base.store import KnowledgeBase
 from shark_answer.modules.examiner_profile import ExaminerProfile
 from shark_answer.modules.explanation import build_explanation_prompt
 from shark_answer.pipelines.base import AnswerVersion, PipelineResult
@@ -51,6 +50,15 @@ DO write (exactly as it would appear on the exam paper):
 - Diagrams described inline as [DIAGRAM: ...]
 - Final boxed answer per sub-part
 
+CRITICAL LENGTH RULE — match answer length to marks allocated:
+- [1] mark: 1 sentence maximum
+- [2] marks: 2–4 lines
+- [3–4] marks: 4–8 lines
+- [5–6] marks (calculation): half page maximum, show all working
+- [8–10] marks: half to one page
+- [12–15] marks (essay-style): one to 1.5 pages maximum
+DO NOT pad. Write only what earns marks.
+
 Answer style: {answer_style}
 
 {marking_context}
@@ -66,6 +74,15 @@ You MUST use a different mathematical approach:
 - Integration by parts → substitution or partial fractions
 
 Write the answer exactly as a student would write it on the CIE exam paper. Full working, correct units, final answer with s.f. No teaching commentary.
+
+CRITICAL LENGTH RULE — match answer length to marks allocated:
+- [1] mark: 1 sentence maximum
+- [2] marks: 2–4 lines
+- [3–4] marks: 4–8 lines
+- [5–6] marks (calculation): half page maximum, show all working
+- [8–10] marks: half to one page
+- [12–15] marks (essay-style): one to 1.5 pages maximum
+DO NOT pad. Write only what earns marks.
 
 Answer style: {answer_style}
 
@@ -92,7 +109,7 @@ async def run_pipeline_a(
     registry: ProviderRegistry,
     config: AppConfig,
     cost_tracker: CostTracker,
-    knowledge_base: Optional[KnowledgeBase] = None,
+    kb_context: str = "",
     examiner_profile: Optional[ExaminerProfile] = None,
     language: str = "en",
     max_versions: int = 5,
@@ -104,12 +121,8 @@ async def run_pipeline_a(
         subject=subject,
     )
 
-    # Build context
-    marking_context = ""
-    if knowledge_base:
-        marking_context = knowledge_base.get_marking_context(
-            subject, question.topic_hints[0] if question.topic_hints else ""
-        )
+    # kb_context is pre-built by the caller (app.py) via knowledge_base.retriever
+    marking_context = kb_context
 
     examiner_guidance = ""
     if examiner_profile:

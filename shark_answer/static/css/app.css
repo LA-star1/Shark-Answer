@@ -166,6 +166,16 @@
   background: rgba(234, 179, 8, 0.15);
   color: #fbbf24;
 }
+/* Full marks variant */
+.badge-score-full {
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+}
+
+/* Export modal backdrop close on outside click */
+#exportModal {
+  backdrop-filter: blur(2px);
+}
 
 /* History list items */
 .history-item {
