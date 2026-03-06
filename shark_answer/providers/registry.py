@@ -128,7 +128,8 @@ class ProviderRegistry:
     ) -> list[ModelResponse]:
         """Call multiple models in parallel, return all responses (including failures).
 
-        Each model gets up to 2 attempts: 30 s timeout per attempt, 5 s delay between.
+        Each model gets 1 attempt with a 15 s timeout (fast-fail to avoid blocking
+        the whole gather on one sluggish or overloaded provider).
         """
         sem = asyncio.Semaphore(self.config.max_concurrent_models)
 
@@ -140,48 +141,84 @@ class ProviderRegistry:
                         content="", provider=p.value, model_name="",
                         success=False, error="Provider not configured",
                     )
-                last: ModelResponse = ModelResponse(
-                    content="", provider=p.value,
-                    model_name=getattr(inst, "model_name", ""),
-                    success=False, error="All attempts failed",
-                )
-                for attempt in range(2):
-                    logger.info("[%s] Calling (attempt %d)...", p.value, attempt + 1)
-                    try:
-                        last = await asyncio.wait_for(
-                            inst.generate(
-                                prompt=prompt, system=system,
-                                temperature=temperature, max_tokens=max_tokens,
-                            ),
-                            timeout=30.0,
+                logger.info("[%s] Calling...", p.value)
+                try:
+                    resp = await asyncio.wait_for(
+                        inst.generate(
+                            prompt=prompt, system=system,
+                            temperature=temperature, max_tokens=max_tokens,
+                        ),
+                        timeout=15.0,
+                    )
+                    if resp.success:
+                        in_tok  = resp.usage.input_tokens  if resp.usage else 0
+                        out_tok = resp.usage.output_tokens if resp.usage else 0
+                        logger.info(
+                            "[%s] OK — %d in / %d out tokens",
+                            p.value, in_tok, out_tok,
                         )
-                        if last.success:
-                            in_tok  = last.usage.input_tokens  if last.usage else 0
-                            out_tok = last.usage.output_tokens if last.usage else 0
-                            logger.info(
-                                "[%s] OK (attempt %d) — %d in / %d out tokens",
-                                p.value, attempt + 1, in_tok, out_tok,
-                            )
-                            return last
-                        logger.warning(
-                            "[%s] Error (attempt %d): %s", p.value, attempt + 1, last.error
-                        )
-                    except asyncio.TimeoutError:
-                        logger.warning(
-                            "[%s] Timeout after 30 s (attempt %d)", p.value, attempt + 1
-                        )
-                        last = ModelResponse(
-                            content="", provider=p.value,
-                            model_name=getattr(inst, "model_name", ""),
-                            success=False, error="Timeout after 30 s",
-                        )
-                    if attempt == 0:
-                        logger.info("[%s] Retrying in 5 s...", p.value)
-                        await asyncio.sleep(5.0)
-                return last
+                    else:
+                        logger.warning("[%s] Error: %s", p.value, resp.error)
+                    return resp
+                except asyncio.TimeoutError:
+                    logger.warning("[%s] Timeout after 15 s", p.value)
+                    return ModelResponse(
+                        content="", provider=p.value,
+                        model_name=getattr(inst, "model_name", ""),
+                        success=False, error="Timeout after 15 s",
+                    )
 
         results = await asyncio.gather(*[_call(p) for p in providers])
         return list(results)
+
+    async def call_with_fallback(
+        self,
+        providers_chain: list[ModelProvider],
+        prompt: str,
+        system: str = "",
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+    ) -> ModelResponse:
+        """Try providers sequentially; return the first successful response.
+
+        Used for critical single-call steps (judge, scorer, explanation) where
+        quality matters but the pipeline must not stall when one provider is down.
+        Each provider gets one attempt with a 15 s timeout before the next is tried.
+        """
+        for p in providers_chain:
+            inst = self.get(p)
+            if inst is None:
+                logger.debug("[fallback] %s not configured, skipping", p.value)
+                continue
+            logger.info("[fallback] Trying %s...", p.value)
+            try:
+                resp = await asyncio.wait_for(
+                    inst.generate(
+                        prompt=prompt, system=system,
+                        temperature=temperature, max_tokens=max_tokens,
+                    ),
+                    timeout=15.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("[fallback] %s timed out after 15 s — trying next", p.value)
+                continue
+            except Exception as exc:
+                logger.warning("[fallback] %s raised %s — trying next", p.value, exc)
+                continue
+
+            if resp.success:
+                logger.info("[fallback] %s succeeded", p.value)
+                return resp
+            logger.warning("[fallback] %s failed (%s) — trying next", p.value, resp.error)
+
+        # All providers in the chain failed
+        providers_str = ", ".join(p.value for p in providers_chain)
+        logger.error("[fallback] All providers failed: %s", providers_str)
+        return ModelResponse(
+            content="", provider="fallback_chain", model_name="",
+            success=False,
+            error=f"All providers failed ({providers_str})",
+        )
 
     async def call_models_with_image_parallel(
         self,
@@ -194,7 +231,7 @@ class ProviderRegistry:
     ) -> list[ModelResponse]:
         """Call multiple models with an image in parallel.
 
-        Each model gets up to 2 attempts: 30 s timeout per attempt, 5 s delay between.
+        Each model gets 1 attempt with a 15 s timeout.
         """
         sem = asyncio.Semaphore(self.config.max_concurrent_models)
 
@@ -206,46 +243,28 @@ class ProviderRegistry:
                         content="", provider=p.value, model_name="",
                         success=False, error="Provider not configured",
                     )
-                last: ModelResponse = ModelResponse(
-                    content="", provider=p.value,
-                    model_name=getattr(inst, "model_name", ""),
-                    success=False, error="All attempts failed",
-                )
-                for attempt in range(2):
-                    logger.info(
-                        "[%s] Calling with image (attempt %d)...", p.value, attempt + 1
+                logger.info("[%s] Calling with image...", p.value)
+                try:
+                    resp = await asyncio.wait_for(
+                        inst.generate_with_image(
+                            prompt=prompt, image_data=image_data,
+                            system=system, temperature=temperature,
+                            max_tokens=max_tokens,
+                        ),
+                        timeout=15.0,
                     )
-                    try:
-                        last = await asyncio.wait_for(
-                            inst.generate_with_image(
-                                prompt=prompt, image_data=image_data,
-                                system=system, temperature=temperature,
-                                max_tokens=max_tokens,
-                            ),
-                            timeout=30.0,
-                        )
-                        if last.success:
-                            logger.info(
-                                "[%s] Image OK (attempt %d)", p.value, attempt + 1
-                            )
-                            return last
-                        logger.warning(
-                            "[%s] Image error (attempt %d): %s",
-                            p.value, attempt + 1, last.error,
-                        )
-                    except asyncio.TimeoutError:
-                        logger.warning(
-                            "[%s] Image timeout after 30 s (attempt %d)", p.value, attempt + 1
-                        )
-                        last = ModelResponse(
-                            content="", provider=p.value,
-                            model_name=getattr(inst, "model_name", ""),
-                            success=False, error="Timeout after 30 s",
-                        )
-                    if attempt == 0:
-                        logger.info("[%s] Retrying in 5 s...", p.value)
-                        await asyncio.sleep(5.0)
-                return last
+                    if resp.success:
+                        logger.info("[%s] Image OK", p.value)
+                    else:
+                        logger.warning("[%s] Image error: %s", p.value, resp.error)
+                    return resp
+                except asyncio.TimeoutError:
+                    logger.warning("[%s] Image timeout after 15 s", p.value)
+                    return ModelResponse(
+                        content="", provider=p.value,
+                        model_name=getattr(inst, "model_name", ""),
+                        success=False, error="Timeout after 15 s",
+                    )
 
         results = await asyncio.gather(*[_call(p) for p in providers])
         return list(results)

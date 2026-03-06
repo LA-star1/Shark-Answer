@@ -187,18 +187,19 @@ class PaperResult:
 
 # ── Standalone scorer (no app globals) ─────────────────────────────────────────
 
-# Module-level cached Haiku scorer — same Anthropic API key as Claude Opus,
-# but claude-haiku-4-5 which is ~60× cheaper for simple mark-scheme comparisons.
-_haiku_scorer_cache: Optional[object] = None   # ClaudeProvider instance
+# Scorer fallback chain:
+#   1. Claude Haiku  — ~60× cheaper than Opus, fast for simple JSON scoring
+#   2. GPT-4o        — reliable fallback when Claude API is overloaded
+#   3. Gemini 2.5    — final fallback if both Claude and OpenAI are unavailable
+#
+# The chain is tried in order; the first successful response wins.
+
+# Module-level cached Haiku scorer (shared Claude API key, Haiku model).
+_haiku_scorer_cache: Optional[object] = None
 
 
 def _get_haiku_scorer(registry) -> object | None:
-    """Get or create a Haiku scorer instance, cached for the lifetime of the process.
-
-    Uses the same Anthropic API key as Claude Opus but with the Haiku model
-    (claude-haiku-4-5-20251001 at $0.25/$1.25 per MTok vs Opus $15/$75).
-    Benchmark scoring is simple mark-scheme comparison — Haiku is sufficient.
-    """
+    """Return a ClaudeProvider using the cheap Haiku model, or None if not configured."""
     global _haiku_scorer_cache
     if _haiku_scorer_cache is not None:
         return _haiku_scorer_cache
@@ -215,6 +216,34 @@ def _get_haiku_scorer(registry) -> object | None:
         model_name="claude-haiku-4-5-20251001",
     )
     return _haiku_scorer_cache
+
+
+def _build_scorer_chain(registry) -> list[object]:
+    """Build an ordered list of scorer provider instances for fallback scoring.
+
+    Returns [Haiku, GPT-4o, Gemini] — skipping any provider not configured.
+    Callers should try each in sequence and use the first successful response.
+    """
+    from shark_answer.config import ModelProvider
+
+    scorers: list[object] = []
+
+    # 1. Haiku — cheapest, primary scorer
+    haiku = _get_haiku_scorer(registry)
+    if haiku:
+        scorers.append(("Claude Haiku", haiku))
+
+    # 2. GPT-4o — reliable fallback
+    gpt4o = registry.get(ModelProvider.GPT4O)
+    if gpt4o:
+        scorers.append(("GPT-4o", gpt4o))
+
+    # 3. Gemini — final fallback
+    gemini = registry.get(ModelProvider.GEMINI)
+    if gemini:
+        scorers.append(("Gemini", gemini))
+
+    return scorers
 
 
 _BENCH_SCORE_SYSTEM = """\
@@ -253,6 +282,27 @@ def _strip_json_fences(text: str) -> str:
     return text
 
 
+def _parse_score_response(
+    resp_content: str, marks: int
+) -> tuple[int, int, str, list[str], list[str]] | None:
+    """Parse a scorer JSON response. Returns None if the response is unparseable."""
+    raw = _strip_json_fences(resp_content)
+    start = raw.find("{")
+    end   = raw.rfind("}") + 1
+    if start < 0 or end <= start:
+        return None
+    try:
+        data     = json.loads(raw[start:end])
+        achieved = int(data.get("marks_achieved", 0))
+        total    = int(data.get("total_marks", marks))
+        grade    = str(data.get("grade_estimate", "?"))
+        hits     = list(data.get("mark_points_hit", []))
+        misses   = list(data.get("mark_points_missed", []))
+        return achieved, total, grade, hits, misses
+    except (json.JSONDecodeError, ValueError, KeyError):
+        return None
+
+
 async def _bench_score(
     registry,
     cost_tracker,
@@ -262,17 +312,16 @@ async def _bench_score(
     ms_text: str,
     subject: str,
 ) -> tuple[int, int, str, list[str], list[str]]:
-    """Score an answer against the MS using Claude.
+    """Score an answer against the MS using a fallback chain of scorers.
 
+    Tries: Claude Haiku → GPT-4o → Gemini (first success wins).
+    Each scorer gets 2 attempts before falling through to the next.
     Returns (marks_achieved, total_marks, grade_estimate, hits, misses).
-    On unrecoverable failure returns grade="SCORE_FAILED" so the report
-    distinguishes a genuine 0 from a scoring API error.
-    Retries up to 2 times with a 10-second delay on timeout/parse failure.
+    Returns grade="SCORE_FAILED" only when ALL scorers are unavailable.
     """
-    # Use Haiku for scoring — same API key as Opus but 60× cheaper for this task
-    scorer = _get_haiku_scorer(registry)
-    if not scorer:
-        return 0, marks, "SCORE_FAILED", [], ["Claude/Haiku unavailable — scoring skipped"]
+    scorer_chain = _build_scorer_chain(registry)
+    if not scorer_chain:
+        return 0, marks, "SCORE_FAILED", [], ["No scorers available (Claude/GPT-4o/Gemini)"]
 
     # Truncate MS excerpt to keep prompt under ~16k chars
     ms_excerpt = ms_text[:12_000]
@@ -285,54 +334,58 @@ async def _bench_score(
         f"Student answer:\n{answer_text}"
     )
 
-    last_error = "unknown"
-    for attempt in range(3):   # 3 attempts total (initial + 2 retries)
-        if attempt > 0:
-            logger.info("Scoring retry %d/2 for Q (waiting 10s)…", attempt)
-            await asyncio.sleep(10)
+    for scorer_name, scorer_inst in scorer_chain:
+        logger.info("Scoring with %s...", scorer_name)
+        last_error = f"{scorer_name} failed"
 
-        try:
-            resp = await scorer.generate(
-                prompt=prompt,
-                system=system,
-                temperature=0.1,
-                max_tokens=1024,
-            )
-            cost_tracker.record(resp, subject, "benchmark_scoring")
-        except Exception as exc:
-            last_error = f"API error: {exc}"
-            logger.warning("Scoring attempt %d failed: %s", attempt + 1, exc)
-            continue   # retry
+        for attempt in range(2):   # 2 attempts per scorer before falling through
+            if attempt > 0:
+                logger.info("  [%s] retry attempt 2...", scorer_name)
 
-        if not resp.success:
-            last_error = f"Model error: {resp.error}"
-            logger.warning("Scoring attempt %d unsuccessful: %s", attempt + 1, resp.error)
-            continue   # retry
+            try:
+                resp = await asyncio.wait_for(
+                    scorer_inst.generate(
+                        prompt=prompt,
+                        system=system,
+                        temperature=0.1,
+                        max_tokens=1024,
+                    ),
+                    timeout=15.0,
+                )
+                cost_tracker.record(resp, subject, "benchmark_scoring")
+            except asyncio.TimeoutError:
+                last_error = f"{scorer_name} timeout"
+                logger.warning("  [%s] timeout on attempt %d", scorer_name, attempt + 1)
+                break   # don't retry timeout — move to next scorer immediately
+            except Exception as exc:
+                last_error = f"{scorer_name} API error: {exc}"
+                logger.warning("  [%s] API error attempt %d: %s", scorer_name, attempt + 1, exc)
+                continue
 
-        try:
-            raw = _strip_json_fences(resp.content)
-            start = raw.find("{")
-            end   = raw.rfind("}") + 1
-            if start < 0 or end <= start:
-                raise ValueError("No JSON object found in response")
-            data     = json.loads(raw[start:end])
-            achieved = int(data.get("marks_achieved", 0))
-            total    = int(data.get("total_marks", marks))
-            grade    = str(data.get("grade_estimate", "?"))
-            hits     = list(data.get("mark_points_hit", []))
-            misses   = list(data.get("mark_points_missed", []))
-            return achieved, total, grade, hits, misses   # success
-        except (json.JSONDecodeError, ValueError, KeyError) as exc:
-            last_error = f"Parse error: {exc}"
-            logger.warning(
-                "Score parse error on attempt %d: %s\n---\n%s",
-                attempt + 1, exc, resp.content[:300],
-            )
-            # retry
+            if not resp.success:
+                last_error = f"{scorer_name} model error: {resp.error}"
+                logger.warning("  [%s] model error attempt %d: %s",
+                               scorer_name, attempt + 1, resp.error)
+                # 529 overloaded → move to next scorer immediately (no point retrying)
+                if "529" in str(resp.error) or "overload" in str(resp.error).lower():
+                    logger.info("  [%s] overloaded, skipping to next scorer", scorer_name)
+                    break
+                continue
 
-    # All 3 attempts exhausted
-    logger.warning("Scoring failed after 3 attempts. Last error: %s", last_error)
-    return 0, marks, "SCORE_FAILED", [], [f"SCORE_FAILED after 3 attempts: {last_error}"]
+            parsed = _parse_score_response(resp.content, marks)
+            if parsed is not None:
+                logger.info("  [%s] scored successfully", scorer_name)
+                return parsed
+
+            last_error = f"{scorer_name} parse error"
+            logger.warning("  [%s] parse error attempt %d: %.100s",
+                           scorer_name, attempt + 1, resp.content)
+            # parse failure: retry once then fall through to next scorer
+
+        logger.warning("Scorer %s exhausted (%s), trying next in chain", scorer_name, last_error)
+
+    logger.error("All scorers failed. Last error: %s", last_error)
+    return 0, marks, "SCORE_FAILED", [], [f"SCORE_FAILED — all scorers unavailable: {last_error}"]
 
 
 # ── File helpers ────────────────────────────────────────────────────────────────

@@ -27,6 +27,14 @@ import logging
 from typing import Optional
 
 from shark_answer.config import AppConfig, ModelProvider, Pipeline, PIPELINE_CONFIG
+
+# Judge / explain fallback chain — tried in order until one succeeds.
+# Claude is primary (best essay scoring); GPT-4o and Gemini are hot standbys.
+JUDGE_FALLBACK_CHAIN: list[ModelProvider] = [
+    ModelProvider.CLAUDE,
+    ModelProvider.GPT4O,
+    ModelProvider.GEMINI,
+]
 from shark_answer.knowledge_base.predictor import build_prediction_context
 from shark_answer.modules.examiner_profile import ExaminerProfile
 from shark_answer.modules.explanation import build_explanation_prompt
@@ -311,31 +319,36 @@ async def run_pipeline_b(
         result.errors.append("All draft writing calls failed")
         return result
 
-    # ===== Step 3: Quality Gate (Claude judge scores each draft) =====
-    logger.info("Pipeline B: Judging %d drafts", len(drafts))
-    judge_provider = PIPELINE_CONFIG["B_essay"]["judge"]
-    judge_models = config.get_available_models([judge_provider])
-    judge_model = judge_models[0] if judge_models else (angle_models[0])
+    # ===== Step 3: Quality Gate (judge scores each draft via fallback chain) =====
+    # JUDGE_FALLBACK_CHAIN = [Claude, GPT-4o, Gemini] — first available succeeds.
+    # If all three are down the draft is passed with a default score so the
+    # pipeline never blocks completely on judge unavailability.
+    logger.info("Pipeline B: Judging %d drafts (chain: %s)",
+                len(drafts), " → ".join(p.value for p in JUDGE_FALLBACK_CHAIN))
 
     passing_drafts: list[tuple[ModelProvider, str, str, float]] = []  # model, angle, text, score
 
-    for model, angle, draft in drafts:
-        judge_inst = registry.get(judge_model)
-        if not judge_inst:
-            passing_drafts.append((model, angle, draft, 75.0))
-            continue
+    judge_sys = JUDGE_SYSTEM.format(subject=subject)
 
-        judge_sys = JUDGE_SYSTEM.format(subject=subject)
+    for model, angle, draft in drafts:
         judge_prompt = f"Question:\n{question.text}\n\nEssay to evaluate:\n{draft}"
-        judge_resp = await judge_inst.generate(
-            prompt=judge_prompt, system=judge_sys,
-            temperature=0.1, max_tokens=2000,
+        judge_resp = await registry.call_with_fallback(
+            JUDGE_FALLBACK_CHAIN,
+            prompt=judge_prompt,
+            system=judge_sys,
+            temperature=0.1,
+            max_tokens=2000,
         )
         cost_tracker.record(judge_resp, subject, "B-judge")
 
-        score = 75.0
-        if judge_resp.success:
-            score = _extract_score(judge_resp.content)
+        if not judge_resp.success:
+            # All judge providers unavailable — pass draft with neutral score
+            logger.warning("All judge providers failed for draft from %s; passing with default score",
+                           model.value)
+            passing_drafts.append((model, angle, draft, 75.0))
+            continue
+
+        score = _extract_score(judge_resp.content)
 
         if score >= 70:  # A-grade threshold
             passing_drafts.append((model, angle, draft, score))
@@ -396,22 +409,22 @@ async def run_pipeline_b(
     humanized: list[str] = await asyncio.gather(*humanize_tasks)
 
     # ===== Step 5: Build versions with explanations =====
-    explain_provider = judge_model  # Claude judges and also explains
-
+    # Explanations use the same fallback chain as judging.
     for i, ((model, angle, _, score), final_text) in enumerate(
         zip(passing_drafts[:max_versions], humanized)
     ):
         explain_prompt = build_explanation_prompt(
             Pipeline.ESSAY, question.text, final_text, language
         )
-        explain_resp = await registry.call_models_parallel(
-            providers=[explain_provider],
+        explain_resp = await registry.call_with_fallback(
+            JUDGE_FALLBACK_CHAIN,
             prompt=explain_prompt,
             system="You are a CIE A-Level essay coach creating study explanations.",
-            temperature=0.4, max_tokens=3000,
+            temperature=0.4,
+            max_tokens=3000,
         )
-        cost_tracker.record_batch(explain_resp, subject, "B-explain")
-        explanation = explain_resp[0].content if explain_resp[0].success else ""
+        cost_tracker.record(explain_resp, subject, "B-explain")
+        explanation = explain_resp.content if explain_resp.success else ""
 
         # Derive display label from angle or model
         assigned_angle = _ESSAY_MODEL_ANGLES.get(model, "")
