@@ -319,6 +319,8 @@ async def _bench_score(
     Returns (marks_achieved, total_marks, grade_estimate, hits, misses).
     Returns grade="SCORE_FAILED" only when ALL scorers are unavailable.
     """
+    from shark_answer.providers.registry import JUDGE_TIMEOUT
+
     scorer_chain = _build_scorer_chain(registry)
     if not scorer_chain:
         return 0, marks, "SCORE_FAILED", [], ["No scorers available (Claude/GPT-4o/Gemini)"]
@@ -350,7 +352,7 @@ async def _bench_score(
                         temperature=0.1,
                         max_tokens=1024,
                     ),
-                    timeout=15.0,
+                    timeout=JUDGE_TIMEOUT,
                 )
                 cost_tracker.record(resp, subject, "benchmark_scoring")
             except asyncio.TimeoutError:

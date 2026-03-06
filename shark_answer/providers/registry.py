@@ -12,6 +12,20 @@ from shark_answer.providers.base import BaseProvider, ModelResponse
 logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Per-call-type timeout constants
+# Sending ~29k tokens of KB context per solver call means models need time to
+# process the full context before generating.  Different steps have different
+# latency profiles:
+#
+#   SOLVER_TIMEOUT  — answer-writing calls (large context, long generation)
+#   JUDGE_TIMEOUT   — judge/scorer calls (large context, shorter generation)
+#   HEALTH_TIMEOUT  — lightweight debug / health-check probes
+# ──────────────────────────────────────────────────────────────────────────────
+SOLVER_TIMEOUT: float = 60.0   # seconds — solver models writing full answers
+JUDGE_TIMEOUT:  float = 45.0   # seconds — judge / scorer / explain calls
+HEALTH_TIMEOUT: float = 10.0   # seconds — debug / health-check probes
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Default model names per provider  (2026 flagship models)
 # TODO: verify exact model strings against each provider's current API docs
 #       before deploying to production.
@@ -128,8 +142,8 @@ class ProviderRegistry:
     ) -> list[ModelResponse]:
         """Call multiple models in parallel, return all responses (including failures).
 
-        Each model gets 1 attempt with a 15 s timeout (fast-fail to avoid blocking
-        the whole gather on one sluggish or overloaded provider).
+        Each model gets 1 attempt with a SOLVER_TIMEOUT (60 s) timeout — generous
+        enough for models to process ~29k tokens of KB context before generating.
         """
         sem = asyncio.Semaphore(self.config.max_concurrent_models)
 
@@ -148,7 +162,7 @@ class ProviderRegistry:
                             prompt=prompt, system=system,
                             temperature=temperature, max_tokens=max_tokens,
                         ),
-                        timeout=15.0,
+                        timeout=SOLVER_TIMEOUT,
                     )
                     if resp.success:
                         in_tok  = resp.usage.input_tokens  if resp.usage else 0
@@ -161,11 +175,11 @@ class ProviderRegistry:
                         logger.warning("[%s] Error: %s", p.value, resp.error)
                     return resp
                 except asyncio.TimeoutError:
-                    logger.warning("[%s] Timeout after 15 s", p.value)
+                    logger.warning("[%s] Timeout after %.0f s", p.value, SOLVER_TIMEOUT)
                     return ModelResponse(
                         content="", provider=p.value,
                         model_name=getattr(inst, "model_name", ""),
-                        success=False, error="Timeout after 15 s",
+                        success=False, error=f"Timeout after {SOLVER_TIMEOUT:.0f} s",
                     )
 
         results = await asyncio.gather(*[_call(p) for p in providers])
@@ -183,7 +197,8 @@ class ProviderRegistry:
 
         Used for critical single-call steps (judge, scorer, explanation) where
         quality matters but the pipeline must not stall when one provider is down.
-        Each provider gets one attempt with a 15 s timeout before the next is tried.
+        Each provider gets one attempt with a JUDGE_TIMEOUT (45 s) before the
+        next is tried — enough for ~29k-token judge prompts to be processed.
         """
         for p in providers_chain:
             inst = self.get(p)
@@ -197,10 +212,11 @@ class ProviderRegistry:
                         prompt=prompt, system=system,
                         temperature=temperature, max_tokens=max_tokens,
                     ),
-                    timeout=15.0,
+                    timeout=JUDGE_TIMEOUT,
                 )
             except asyncio.TimeoutError:
-                logger.warning("[fallback] %s timed out after 15 s — trying next", p.value)
+                logger.warning("[fallback] %s timed out after %.0f s — trying next",
+                               p.value, JUDGE_TIMEOUT)
                 continue
             except Exception as exc:
                 logger.warning("[fallback] %s raised %s — trying next", p.value, exc)
@@ -231,7 +247,7 @@ class ProviderRegistry:
     ) -> list[ModelResponse]:
         """Call multiple models with an image in parallel.
 
-        Each model gets 1 attempt with a 15 s timeout.
+        Each model gets 1 attempt with a SOLVER_TIMEOUT (60 s) timeout.
         """
         sem = asyncio.Semaphore(self.config.max_concurrent_models)
 
@@ -251,7 +267,7 @@ class ProviderRegistry:
                             system=system, temperature=temperature,
                             max_tokens=max_tokens,
                         ),
-                        timeout=15.0,
+                        timeout=SOLVER_TIMEOUT,
                     )
                     if resp.success:
                         logger.info("[%s] Image OK", p.value)
@@ -259,11 +275,11 @@ class ProviderRegistry:
                         logger.warning("[%s] Image error: %s", p.value, resp.error)
                     return resp
                 except asyncio.TimeoutError:
-                    logger.warning("[%s] Image timeout after 15 s", p.value)
+                    logger.warning("[%s] Image timeout after %.0f s", p.value, SOLVER_TIMEOUT)
                     return ModelResponse(
                         content="", provider=p.value,
                         model_name=getattr(inst, "model_name", ""),
-                        success=False, error="Timeout after 15 s",
+                        success=False, error=f"Timeout after {SOLVER_TIMEOUT:.0f} s",
                     )
 
         results = await asyncio.gather(*[_call(p) for p in providers])
