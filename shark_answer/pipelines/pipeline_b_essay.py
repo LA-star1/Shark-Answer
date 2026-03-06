@@ -27,7 +27,7 @@ import logging
 from typing import Optional
 
 from shark_answer.config import AppConfig, ModelProvider, Pipeline, PIPELINE_CONFIG
-from shark_answer.providers.registry import SOLVER_TIMEOUT
+from shark_answer.providers.registry import SHORT_TIMEOUT, JUDGE_TIMEOUT, SOLVER_TIMEOUT
 
 # Judge / explain fallback chain — tried in order until one succeeds.
 # Claude is primary (best essay scoring); GPT-4o and Gemini are hot standbys.
@@ -73,6 +73,13 @@ _PREMIUM_KB_MODELS: frozenset[ModelProvider] = frozenset({
     ModelProvider.GPT4O,
 })
 _BUDGET_KB_CHARS: int = 3_000
+
+# Models that consistently time out / are overloaded — excluded from primary
+# drafting pools by default.  They are only used as a last resort when every
+# primary model is unavailable.
+_BACKUP_MODELS: frozenset[ModelProvider] = frozenset({
+    ModelProvider.QWEN,
+})
 
 
 def _trim_kb_context(kb_context: str, max_chars: int = _BUDGET_KB_CHARS) -> str:
@@ -195,6 +202,194 @@ You are Personality #{personality_num}. Rewrite the essay in this voice while:
 {examiner_guidance}"""
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# SHORT PATH  (1–3 marks)
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def _run_b_short_path(
+    result: "PipelineResult",
+    question: "ExtractedQuestion",
+    subject: str,
+    registry: "ProviderRegistry",
+    cost_tracker: "CostTracker",
+    marking_context: str,
+    language: str,
+    lang_suffix: str,
+) -> "PipelineResult":
+    """Fast path for 1–3 mark questions.
+
+    Uses Claude + GPT-4o only with a direct concise prompt — no angle
+    brainstorming, no humanisation, no judge.  If both primary models fail,
+    falls back to Gemini.  Target latency: ≤ 30 seconds.
+    """
+    short_prompt = (
+        f"Question [{question.marks} marks]:\n{question.text}\n\n"
+        f"Give a precise answer in {question.marks} sentence(s) maximum. "
+        f"Use exact CIE A-Level {subject} terminology. No elaboration.{lang_suffix}"
+    )
+    short_sys = (
+        f"You are writing a CIE A-Level {subject} exam answer. "
+        f"This is a {question.marks}-mark short-answer question. "
+        f"Be precise and use correct terminology.\n\n"
+        + (marking_context[:2000] if marking_context else "")
+    )
+
+    primary = [ModelProvider.CLAUDE, ModelProvider.GPT4O]
+    fallback = [ModelProvider.GEMINI, ModelProvider.KIMI, ModelProvider.GLM]
+
+    async def _quick(model: ModelProvider) -> tuple[ModelProvider, str | None]:
+        inst = registry.get(model)
+        if not inst:
+            return model, None
+        try:
+            resp = await asyncio.wait_for(
+                inst.generate(
+                    prompt=short_prompt, system=short_sys,
+                    temperature=0.2, max_tokens=512,
+                ),
+                timeout=SHORT_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("[%s] short-path timed out after %.0fs", model.value, SHORT_TIMEOUT)
+            return model, None
+        cost_tracker.record(resp, subject, "B-short")
+        return model, (resp.content if resp.success else None)
+
+    # Run primary models in parallel
+    primary_results = await asyncio.gather(*[_quick(m) for m in primary])
+    successful = [(m, c) for m, c in primary_results if c is not None]
+
+    # If neither primary model answered, try fallbacks sequentially
+    if not successful:
+        for fb in fallback:
+            _, content = await _quick(fb)
+            if content:
+                successful = [(fb, content)]
+                break
+
+    if not successful:
+        result.errors.append("Short path: all models failed")
+        return result
+
+    # Output directly — no judge or humanisation needed for ≤3-mark questions
+    for i, (model, text) in enumerate(successful):
+        result.versions.append(AnswerVersion(
+            version_number=i + 1,
+            answer_text=text,
+            explanation_text="",
+            approach_label="Direct Answer",
+            provider=model.value,
+            quality_score=75.0,
+            language=language,
+        ))
+    return result
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# MEDIUM PATH  (4–6 marks)
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def _run_b_medium_path(
+    result: "PipelineResult",
+    question: "ExtractedQuestion",
+    subject: str,
+    registry: "ProviderRegistry",
+    config: "AppConfig",
+    cost_tracker: "CostTracker",
+    marking_context: str,
+    examiner_guidance: str,
+    language: str,
+    lang_suffix: str,
+    max_versions: int,
+) -> "PipelineResult":
+    """Medium path for 4–6 mark questions.
+
+    Uses Claude + GPT-4o + Gemini + DeepSeek with a direct draft prompt
+    (no angle brainstorm) and a quick parallel judge round.  No humanisation.
+    Timeout: JUDGE_TIMEOUT (45 s) per draft call.
+    """
+    medium_priority = [
+        ModelProvider.CLAUDE, ModelProvider.GPT4O,
+        ModelProvider.GEMINI, ModelProvider.DEEPSEEK,
+    ]
+    medium_models = config.get_available_models(medium_priority)
+    if not medium_models:
+        # Fallback to any configured model
+        medium_models = config.get_available_models([
+            ModelProvider.KIMI, ModelProvider.GLM, ModelProvider.MINIMAX,
+        ])
+    if not medium_models:
+        result.errors.append("Medium path: no models configured")
+        return result
+
+    word_target = question.marks * 60   # ~240 w for 4 m, 360 w for 6 m
+    med_sys = (
+        f"You are writing a CIE A-Level {subject} exam answer.\n"
+        f"This is a {question.marks}-mark question. "
+        f"Write a complete, well-structured answer using precise terminology.\n\n"
+        + (marking_context[:8000] if marking_context else "")
+        + (f"\n{examiner_guidance}" if examiner_guidance else "")
+    )
+    med_prompt = (
+        f"Question [{question.marks} marks]:\n{question.text}\n\n"
+        f"Write a complete answer (~{word_target} words).{lang_suffix}"
+    )
+
+    async def _med_draft(model: ModelProvider) -> tuple[ModelProvider, str | None]:
+        inst = registry.get(model)
+        if not inst:
+            return model, None
+        try:
+            resp = await asyncio.wait_for(
+                inst.generate(
+                    prompt=med_prompt, system=med_sys,
+                    temperature=0.5, max_tokens=2000,
+                ),
+                timeout=JUDGE_TIMEOUT,   # 45 s — medium questions, shorter than full drafts
+            )
+        except asyncio.TimeoutError:
+            logger.warning("[%s] medium draft timed out after %.0fs", model.value, JUDGE_TIMEOUT)
+            return model, None
+        cost_tracker.record(resp, subject, "B-med-draft")
+        return model, (resp.content if resp.success else None)
+
+    draft_results = await asyncio.gather(*[_med_draft(m) for m in medium_models])
+    drafts = [(m, d) for m, d in draft_results if d is not None]
+
+    if not drafts:
+        result.errors.append("Medium path: all draft models failed")
+        return result
+
+    # Quick parallel judge to rank drafts
+    judge_sys_med = JUDGE_SYSTEM.format(subject=subject)
+
+    async def _quick_judge(model: ModelProvider, draft: str) -> tuple[ModelProvider, str, float]:
+        j_prompt = f"Question:\n{question.text}\n\nEssay to evaluate:\n{draft}"
+        j_resp = await registry.call_with_fallback(
+            JUDGE_FALLBACK_CHAIN,
+            prompt=j_prompt, system=judge_sys_med,
+            temperature=0.1, max_tokens=1000,
+        )
+        cost_tracker.record(j_resp, subject, "B-med-judge")
+        score = _extract_score(j_resp.content) if j_resp.success else 75.0
+        return model, draft, score
+
+    scored = list(await asyncio.gather(*[_quick_judge(m, d) for m, d in drafts]))
+    scored.sort(key=lambda x: x[2], reverse=True)
+
+    for i, (model, draft, score) in enumerate(scored[:max_versions]):
+        result.versions.append(AnswerVersion(
+            version_number=i + 1,
+            answer_text=draft,
+            explanation_text="",
+            approach_label=f"Version {i + 1}",
+            provider=model.value,
+            quality_score=score,
+            language=language,
+        ))
+    return result
+
+
 async def run_pipeline_b(
     question: ExtractedQuestion,
     subject: str,
@@ -235,6 +430,26 @@ async def run_pipeline_b(
 
     lang_suffix = "\n\nWrite your answer in Chinese (简体中文)." if language == "zh" else ""
 
+    # ── Route by marks ─────────────────────────────────────────────────────
+    marks = question.marks
+    if marks <= 3:
+        # SHORT PATH — direct answer, no brainstorm, no judge, target ≤30 s
+        logger.info("Pipeline B [SHORT path, %dm]: Q%s", marks, question.number)
+        return await _run_b_short_path(
+            result, question, subject, registry, cost_tracker,
+            marking_context, language, lang_suffix,
+        )
+    if marks <= 6:
+        # MEDIUM PATH — 3–4 models, direct draft, quick judge, target ≤60 s
+        logger.info("Pipeline B [MEDIUM path, %dm]: Q%s", marks, question.number)
+        return await _run_b_medium_path(
+            result, question, subject, registry, config, cost_tracker,
+            marking_context, examiner_guidance, language, lang_suffix, max_versions,
+        )
+
+    # FULL PATH (7+ marks) — multi-angle, full judge, humanise
+    logger.info("Pipeline B [FULL path, %dm]: Q%s", marks, question.number)
+
     # Build ordered list of (model, angle) for available configured models
     all_angle_models = config.get_available_models(list(_ESSAY_MODEL_ANGLES.keys()))
     if not all_angle_models:
@@ -244,10 +459,10 @@ async def run_pipeline_b(
         result.errors.append("No brainstorm models configured for Pipeline B")
         return result
 
-    # ALL configured models always participate in angle + draft generation.
-    # max_versions only limits the FINAL output (how many versions the user sees).
-    # This ensures cross-model quality competition even when versions=1.
-    angle_models = all_angle_models
+    # Exclude backup models (e.g. Qwen) from the primary drafting pool.
+    # They are only included as a last resort when every primary model is gone.
+    angle_models_primary = [m for m in all_angle_models if m not in _BACKUP_MODELS]
+    angle_models = angle_models_primary if angle_models_primary else all_angle_models
     word_target = max(300, question.marks * 40)
 
     question_prompt = (

@@ -27,7 +27,7 @@ from shark_answer.modules.examiner_profile import ExaminerProfile
 from shark_answer.modules.explanation import build_explanation_prompt
 from shark_answer.pipelines.base import AnswerVersion, PipelineResult
 from shark_answer.providers.base import ModelResponse
-from shark_answer.providers.registry import ProviderRegistry
+from shark_answer.providers.registry import ProviderRegistry, SHORT_TIMEOUT
 from shark_answer.utils.cost_tracker import CostTracker
 from shark_answer.utils.image_extractor import ExtractedQuestion
 from shark_answer.utils.math_verifier import verify_numeric_agreement
@@ -167,7 +167,55 @@ async def run_pipeline_a(
         result.errors.append("No primary models configured for Pipeline A")
         return result
 
-    logger.info("Pipeline A: %d models solving Q%s", len(primary_models), question.number)
+    # ── Route by marks ─────────────────────────────────────────────────────
+    # SHORT PATH (1–3 marks): 2 models, SHORT_TIMEOUT (30 s), no debate,
+    # no alternative methods.  These questions need one brief precise answer.
+    if question.marks <= 3:
+        short_models = primary_models[:2]
+        logger.info("Pipeline A [SHORT path, %dm]: %d models solving Q%s",
+                    question.marks, len(short_models), question.number)
+        responses = await registry.call_models_parallel(
+            providers=short_models,
+            prompt=question_prompt,
+            system=system_prompt,
+            temperature=0.3,
+            max_tokens=1024,
+            timeout=SHORT_TIMEOUT,
+        )
+        cost_tracker.record_batch(responses, subject, "A")
+        successful = [(m, r) for m, r in zip(short_models, responses) if r.success]
+        if not successful:
+            result.errors.append("Short path: all models failed")
+            return result
+        for i, (model, resp) in enumerate(successful):
+            result.versions.append(AnswerVersion(
+                version_number=i + 1,
+                answer_text=resp.content,
+                provider=model.value,
+                language=language,
+                approach_label="Direct Answer",
+            ))
+        # One brief explanation for the first version
+        if result.versions:
+            ep = build_explanation_prompt(
+                Pipeline.SCIENCE_MATH, question.text, result.versions[0].answer_text, language
+            )
+            ep_resp = await registry.call_models_parallel(
+                providers=[primary_models[0]],
+                prompt=ep,
+                system="You are a CIE A-Level tutor. Write a brief study note.",
+                temperature=0.4,
+                max_tokens=800,
+                timeout=SHORT_TIMEOUT,
+            )
+            cost_tracker.record_batch(ep_resp, subject, "A-explain")
+            if ep_resp[0].success:
+                result.versions[0].explanation_text = ep_resp[0].content
+        return result
+
+    # FULL PATH (4+ marks): all primary models, optional debate, alt methods
+    logger.info("Pipeline A [FULL path, %dm]: %d models solving Q%s",
+                question.marks, len(primary_models), question.number)
     responses = await registry.call_models_parallel(
         providers=primary_models,
         prompt=question_prompt,

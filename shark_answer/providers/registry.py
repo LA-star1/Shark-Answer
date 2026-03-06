@@ -21,8 +21,9 @@ logger = logging.getLogger(__name__)
 #   JUDGE_TIMEOUT   — judge/scorer calls (large context, shorter generation)
 #   HEALTH_TIMEOUT  — lightweight debug / health-check probes
 # ──────────────────────────────────────────────────────────────────────────────
-SOLVER_TIMEOUT: float = 60.0   # seconds — solver models writing full answers
+SHORT_TIMEOUT:  float = 30.0   # seconds — fast path for 1–3 mark questions
 JUDGE_TIMEOUT:  float = 45.0   # seconds — judge / scorer / explain calls
+SOLVER_TIMEOUT: float = 60.0   # seconds — solver models writing full answers
 HEALTH_TIMEOUT: float = 10.0   # seconds — debug / health-check probes
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -139,12 +140,15 @@ class ProviderRegistry:
         system: str = "",
         temperature: float = 0.7,
         max_tokens: int = 4096,
+        timeout: float | None = None,
     ) -> list[ModelResponse]:
         """Call multiple models in parallel, return all responses (including failures).
 
-        Each model gets 1 attempt with a SOLVER_TIMEOUT (60 s) timeout — generous
-        enough for models to process ~29k tokens of KB context before generating.
+        Each model gets 1 attempt.  ``timeout`` defaults to SOLVER_TIMEOUT (60 s)
+        but callers can pass a shorter value (e.g. SHORT_TIMEOUT for fast-path
+        questions) to fail-fast on slow providers.
         """
+        _timeout = timeout if timeout is not None else SOLVER_TIMEOUT
         sem = asyncio.Semaphore(self.config.max_concurrent_models)
 
         async def _call(p: ModelProvider) -> ModelResponse:
@@ -162,7 +166,7 @@ class ProviderRegistry:
                             prompt=prompt, system=system,
                             temperature=temperature, max_tokens=max_tokens,
                         ),
-                        timeout=SOLVER_TIMEOUT,
+                        timeout=_timeout,
                     )
                     if resp.success:
                         in_tok  = resp.usage.input_tokens  if resp.usage else 0
@@ -175,11 +179,11 @@ class ProviderRegistry:
                         logger.warning("[%s] Error: %s", p.value, resp.error)
                     return resp
                 except asyncio.TimeoutError:
-                    logger.warning("[%s] Timeout after %.0f s", p.value, SOLVER_TIMEOUT)
+                    logger.warning("[%s] Timeout after %.0f s", p.value, _timeout)
                     return ModelResponse(
                         content="", provider=p.value,
                         model_name=getattr(inst, "model_name", ""),
-                        success=False, error=f"Timeout after {SOLVER_TIMEOUT:.0f} s",
+                        success=False, error=f"Timeout after {_timeout:.0f} s",
                     )
 
         results = await asyncio.gather(*[_call(p) for p in providers])
