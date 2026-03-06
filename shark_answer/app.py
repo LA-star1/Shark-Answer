@@ -129,12 +129,15 @@ class QuestionResultOut(BaseModel):
     verification_notes: str
     disagreement_resolved: bool
     errors: list[str]
+    providers_ok: list[str] = []     # models that responded successfully
 
 
 class PaperResultOut(BaseModel):
     total_questions: int
     results: list[QuestionResultOut]
     cost_summary: dict
+    timing: dict = {}                # stage timings in seconds
+    submission_cost_usd: float = 0.0 # cost for this submission only
 
 
 class ExaminerProfileOut(BaseModel):
@@ -352,6 +355,8 @@ def _build_question_results(results: list) -> list[QuestionResultOut]:
             )
             for v in pr.versions
         ]
+        # Collect unique providers that responded (preserving insertion order)
+        providers_ok = list(dict.fromkeys(v.provider for v in pr.versions))
         out.append(QuestionResultOut(
             question_number=pr.question.number,
             question_text=pr.question.text,
@@ -361,6 +366,7 @@ def _build_question_results(results: list) -> list[QuestionResultOut]:
             verification_notes=pr.verification_notes,
             disagreement_resolved=pr.disagreement_resolved,
             errors=pr.errors,
+            providers_ok=providers_ok,
         ))
     return out
 
@@ -588,11 +594,15 @@ async def _solve_sse_generator(
     _last_run_log = {"started": time.strftime("%Y-%m-%d %H:%M:%S"), "subject": subject, "stages": []}
 
     try:
+        t_start = time.time()
+        cost_before = _cost_tracker.total_cost
+
         # ── Stage: extract ──
         yield sse("stage", {"id": "extract", "label": "Extracting questions via AI vision...", "done": False})
         questions, extract_responses = await extract_questions_from_images(_registry, image_data_list)
         _cost_tracker.record_batch(extract_responses, subject, "extraction")
         _last_run_log["stages"].append({"stage": "extract", "questions": len(questions)})
+        t_extract = time.time()
 
         if not questions:
             yield sse("error", {"message": "Could not extract any questions from the uploaded files"})
@@ -637,6 +647,7 @@ async def _solve_sse_generator(
         _last_run_log["stages"].append({
             "stage": "solve", "questions": len(questions), "with_answers": responding,
         })
+        t_solve = time.time()
         yield sse("stage", {
             "id": "solve",
             "label": f"Solved {len(questions)} question(s) — models responding: {responding}/{len(questions)} ✓",
@@ -681,16 +692,28 @@ async def _solve_sse_generator(
                 })
 
         _last_run_log["stages"].append({"stage": "score", "versions_scored": scored})
+        t_score = time.time()
         yield sse("stage", {"id": "score", "label": f"Scoring complete — {scored} version(s) scored ✓", "done": True})
 
         # ── Stage: finalize ──
         yield sse("stage", {"id": "finalize", "label": "Building final results…", "done": False})
+
+        t_total = time.time()
+        submission_cost = round(_cost_tracker.total_cost - cost_before, 6)
+        timing = {
+            "extract_s": round(t_extract - t_start, 1),
+            "solve_s":   round(t_solve   - t_extract, 1),
+            "score_s":   round(t_score   - t_solve, 1),
+            "total_s":   round(t_total   - t_start, 1),
+        }
 
         question_results = _build_question_results(results)
         paper_result = PaperResultOut(
             total_questions=len(questions),
             results=question_results,
             cost_summary=_cost_tracker.summary(),
+            timing=timing,
+            submission_cost_usd=submission_cost,
         )
 
         sid = str(uuid.uuid4())[:8]
@@ -701,6 +724,8 @@ async def _solve_sse_generator(
             "filenames": filenames,
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
             "total_questions": paper_result.total_questions,
+            "timing_s": timing,
+            "submission_cost_usd": submission_cost,
             "data": paper_result.model_dump(),
         })
 
@@ -729,6 +754,8 @@ async def get_history():
             "filenames": h["filenames"],
             "timestamp": h["timestamp"],
             "total_questions": h["total_questions"],
+            "timing_s": h.get("timing_s"),
+            "submission_cost_usd": h.get("submission_cost_usd"),
         }
         for h in reversed(_history)
     ]
@@ -1162,8 +1189,16 @@ async def debug_models():
     if not _config or not _registry:
         raise HTTPException(500, "Server not initialized")
 
+    from shark_answer.providers.registry import DEFAULT_MODELS
     results: dict[str, dict] = {}
     for provider in list(_config.models.keys()):
+        # Skip providers with no model name (e.g. Grok key present but model disabled)
+        model_cfg = _config.models.get(provider)
+        resolved_model = (model_cfg.model_name if model_cfg else None) or DEFAULT_MODELS.get(provider, "")
+        if not resolved_model:
+            results[provider.value] = {"status": "disabled", "model": "", "error": "No model name configured (provider disabled)"}
+            continue
+
         inst = _registry.get(provider)
         if inst is None:
             results[provider.value] = {"status": "not_configured", "model": ""}

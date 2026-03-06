@@ -17,38 +17,37 @@ logger = logging.getLogger(__name__)
 #       before deploying to production.
 # ──────────────────────────────────────────────────────────────────────────────
 DEFAULT_MODELS: dict[ModelProvider, str] = {
-    # Anthropic — use claude-opus-4-5 if available; fall back to sonnet-4
-    # TODO: verify latest Opus string via console.anthropic.com/docs/models
+    # Anthropic — Opus 4.5 (stable API alias, 4-6 string returns 404)
     ModelProvider.CLAUDE:   "claude-opus-4-5",
 
     # OpenAI  — two separate instances from the same API key
-    # GPT4O keeps gpt-4o (vision-safe, known working); override via model_name in .env
-    # when gpt-5.2-thinking or newer is confirmed available.
+    # GPT4O keeps gpt-4o (vision-safe, known working)
     ModelProvider.GPT4O:    "gpt-4o",
     # TEMP: org-verification pending → using o3-mini as fallback.
     # Swap back to "o3-pro" once OpenAI verifies the organisation.
     ModelProvider.O3PRO:    "o3-mini",          # TODO: revert to "o3-pro"
 
-    # DeepSeek  — V3.2 (deepseek-chat = non-thinking; deepseek-reasoner = CoT/thinking)
-    ModelProvider.DEEPSEEK: "deepseek-reasoner",            # deepseek-reasoner → DeepSeek-V3.2 CoT/thinking
+    # DeepSeek  — deepseek-chat = V3.2 non-thinking; deepseek-reasoner = CoT/thinking
+    # Pipeline A (science/math) uses deepseek-reasoner (CoT/thinking mode)
+    ModelProvider.DEEPSEEK: "deepseek-reasoner",
 
-    # Google Gemini  — 3.1 Pro
-    ModelProvider.GEMINI:   "gemini-3.1-pro-preview",       # preview string confirmed via ListModels
+    # Google Gemini  — 2.5 Pro (stable, replaces 3.1-pro-preview)
+    ModelProvider.GEMINI:   "gemini-2.5-pro",
 
-    # Alibaba Qwen  — Qwen3-Max
-    ModelProvider.QWEN:     "qwen3-max",                   # TODO: verify availability
+    # Alibaba Qwen  — Qwen 3.5 Plus
+    ModelProvider.QWEN:     "qwen3.5-plus",
 
-    # xAI Grok  — vision-capable variant
-    ModelProvider.GROK:     "grok-2-vision-1212",
+    # xAI Grok  — DISABLED: grok-2-vision-1212 returns 404, not worth debugging
+    # ModelProvider.GROK:  "grok-2-vision-1212",
 
-    # MiniMax  — M2.5
-    ModelProvider.MINIMAX:  "minimax-m2.5",                # TODO: verify model string
+    # MiniMax  — Text-01 (confirmed stable API string)
+    ModelProvider.MINIMAX:  "MiniMax-Text-01",
 
-    # Moonshot Kimi  — K2.5
-    ModelProvider.KIMI:     "kimi-k2.5",                   # TODO: verify model string
+    # Moonshot Kimi  — moonshot-v1-128k (standard 128k model, replaces kimi-k2.5 reasoning)
+    ModelProvider.KIMI:     "moonshot-v1-128k",
 
     # Zhipu AI  — GLM-5
-    ModelProvider.GLM:      "glm-5",                       # TODO: verify release
+    ModelProvider.GLM:      "glm-5",
 }
 
 # Default base URLs for providers that don't use the canonical OpenAI endpoint
@@ -104,8 +103,9 @@ class ProviderRegistry:
             # Only Grok supports the image_url vision format among compat providers.
             # DeepSeek-chat, Qwen-plus, GLM text models do NOT support image inputs.
             vision_support = provider in {ModelProvider.GROK}
-            # kimi-k2.5 is a reasoning model that only accepts temperature=1.
-            fixed_temp = 1.0 if provider == ModelProvider.KIMI else None
+            # moonshot-v1-128k is a standard model — no fixed temperature needed.
+            # (old kimi-k2.5 was a reasoning model requiring temp=1.0; removed)
+            fixed_temp = None
             instance = OpenAICompatProvider(
                 api_key=api_key,
                 base_url=base_url,

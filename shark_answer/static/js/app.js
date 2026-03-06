@@ -265,14 +265,40 @@ function showResultsSection(data) {
 
   // Cost bar
   const cost = data.cost_summary || {};
+  const timing = data.timing || {};
+  const subCost = data.submission_cost_usd != null ? data.submission_cost_usd : null;
   const costBar = el('div', 'cost-bar');
   costBar.innerHTML = `
     <div class="cost-item">Questions: <span>${data.total_questions}</span></div>
-    <div class="cost-item">Total Cost: <span>$${(cost.total_cost_usd || 0).toFixed(4)}</span></div>
+    <div class="cost-item">This run: <span>$${(subCost != null ? subCost : cost.total_cost_usd || 0).toFixed(4)}</span></div>
     <div class="cost-item">Input Tokens: <span>${(cost.total_input_tokens || 0).toLocaleString()}</span></div>
     <div class="cost-item">Output Tokens: <span>${(cost.total_output_tokens || 0).toLocaleString()}</span></div>
+    ${timing.total_s != null ? `<div class="cost-item">Time: <span>${timing.total_s}s</span></div>` : ''}
   `;
   resultsContainer.appendChild(costBar);
+
+  // Performance panel (collapsible, below cost bar)
+  if (timing.total_s != null) {
+    const perfToggle = el('button', 'perf-toggle');
+    perfToggle.innerHTML = `<span class="perf-toggle-arrow">▶</span> Timing breakdown`;
+    const perfPanel = el('div', 'perf-panel hidden');
+    const stages = [
+      { label: 'Extract', key: 'extract_s' },
+      { label: 'Solve', key: 'solve_s' },
+      { label: 'Score', key: 'score_s' },
+      { label: 'Total', key: 'total_s' },
+    ];
+    perfPanel.innerHTML = stages
+      .filter(s => timing[s.key] != null)
+      .map(s => `<span class="perf-stage"><span class="perf-label">${s.label}</span><span class="perf-value">${timing[s.key]}s</span></span>`)
+      .join('<span class="perf-sep">→</span>');
+    perfToggle.onclick = () => {
+      const open = perfPanel.classList.toggle('hidden');
+      perfToggle.querySelector('.perf-toggle-arrow').textContent = open ? '▶' : '▼';
+    };
+    resultsContainer.appendChild(perfToggle);
+    resultsContainer.appendChild(perfPanel);
+  }
 
   if (!data.results || data.results.length === 0) {
     const noData = el('div', 'text-center py-16 text-zinc-500');
@@ -397,12 +423,22 @@ function showResultsSection(data) {
       // Technical details collapsible (hidden by default — no AI branding in main view)
       const techBtn = el('button', 'mt-3 text-xs text-zinc-600 hover:text-zinc-400 flex items-center gap-1 transition');
       techBtn.innerHTML = 'ℹ Technical Details';
-      const techPanel = el('div', 'hidden mt-1 p-3 rounded-lg border border-zinc-800/60 text-xs text-zinc-600 space-y-0.5');
+      const techPanel = el('div', 'hidden mt-1 p-3 rounded-lg border border-zinc-800/60 text-xs text-zinc-600 space-y-1');
+      // All models that participated in solving this question
+      const allProviders = qr.providers_ok && qr.providers_ok.length > 0 ? qr.providers_ok : (providerStr ? [providerStr] : []);
+      const providersHtml = allProviders.length > 0
+        ? `<div>Models: <span class="text-zinc-400">${allProviders.map(p => `<span class="inline-block bg-zinc-800 rounded px-1.5 py-0.5 mr-1 mb-0.5">${esc(p)}</span>`).join('')}</span></div>`
+        : '';
+      const selectedHtml = providerStr
+        ? `<div>Selected: <span class="text-zinc-400 bg-zinc-800 rounded px-1.5 py-0.5">${providerStr}</span></div>`
+        : '';
       techPanel.innerHTML = [
         `<div>Pipeline: <span class="text-zinc-500">${esc(qr.pipeline)}</span></div>`,
-        providerStr ? `<div>Model: <span class="text-zinc-500">${providerStr}</span></div>` : '',
+        providersHtml,
+        allProviders.length > 1 ? selectedHtml : '',
         version.approach_label ? `<div>Style: <span class="text-zinc-500">${esc(version.approach_label)}</span></div>` : '',
         qs ? `<div>Score: <span class="text-zinc-500">${esc(qs)}</span></div>` : '',
+        qr.verification_notes ? `<div>Verify: <span class="text-zinc-500">${esc(qr.verification_notes)}</span></div>` : '',
       ].filter(Boolean).join('');
       techBtn.onclick = () => techPanel.classList.toggle('hidden');
       block.appendChild(techBtn);
@@ -697,9 +733,12 @@ function renderHistory(items) {
     const div = el('div', 'history-item');
     div.dataset.id = h.id;
     const nameStr = h.filenames ? h.filenames[0] : 'Paper';
+    const costStr = h.submission_cost_usd != null ? ` · $${h.submission_cost_usd.toFixed(4)}` : '';
+    const timeStr = h.timing_s && h.timing_s.total_s != null ? ` · ${h.timing_s.total_s}s` : '';
     div.innerHTML = `
       <div class="text-sm font-medium truncate">${esc(nameStr)}</div>
-      <div class="text-xs text-zinc-500 mt-0.5">${esc(h.subject.replace('_', ' '))} · ${h.total_questions}Q · ${esc(h.timestamp)}</div>
+      <div class="text-xs text-zinc-500 mt-0.5">${esc(h.subject.replace('_', ' '))} · ${h.total_questions}Q${costStr}${timeStr}</div>
+      <div class="text-xs text-zinc-600 mt-0.5">${esc(h.timestamp)}</div>
     `;
     div.onclick = () => loadHistoryEntry(h.id);
     historyList.appendChild(div);

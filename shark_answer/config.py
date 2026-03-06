@@ -48,15 +48,15 @@ SUBJECT_PIPELINE_MAP: dict[Subject, Pipeline] = {
 
 
 class ModelProvider(str, Enum):
-    CLAUDE   = "claude"    # Anthropic  — claude-opus-4-6-20250901
-    GPT4O    = "gpt4o"     # OpenAI     — gpt-5.2-thinking  (essays / general)
-    O3PRO    = "o3pro"     # OpenAI     — o3-mini (temp) / o3-pro (after org verify)
-    DEEPSEEK = "deepseek"  # DeepSeek   — deepseek-chat (V3.2) / deepseek-reasoner (CoT)
-    GEMINI   = "gemini"    # Google     — gemini-3.1-pro-preview
-    QWEN     = "qwen"      # Alibaba    — qwen3-max
-    GROK     = "grok"      # xAI        — grok-2-vision-1212
-    MINIMAX  = "minimax"   # MiniMax    — minimax-m2.5
-    KIMI     = "kimi"      # Moonshot   — kimi-k2.5
+    CLAUDE   = "claude"    # Anthropic  — claude-opus-4-5
+    GPT4O    = "gpt4o"     # OpenAI     — gpt-4o  (vision-safe, essays / general)
+    O3PRO    = "o3pro"     # OpenAI     — o3-mini (temp; revert to o3-pro after org verify)
+    DEEPSEEK = "deepseek"  # DeepSeek   — deepseek-reasoner (CoT/thinking, Pipeline A)
+    GEMINI   = "gemini"    # Google     — gemini-2.5-pro
+    QWEN     = "qwen"      # Alibaba    — qwen3.5-plus
+    GROK     = "grok"      # xAI        — DISABLED (grok-2-vision-1212 returns 404)
+    MINIMAX  = "minimax"   # MiniMax    — MiniMax-Text-01
+    KIMI     = "kimi"      # Moonshot   — moonshot-v1-128k
     GLM      = "glm"       # Zhipu AI   — glm-5
 
 

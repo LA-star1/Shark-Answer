@@ -325,3 +325,45 @@
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+
+/* ── Performance timing panel ── */
+.perf-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #52525b;
+  cursor: pointer;
+  margin-bottom: 4px;
+  margin-top: -10px;
+  padding: 4px 0;
+  background: transparent;
+  border: none;
+  transition: color 0.15s;
+}
+.perf-toggle:hover { color: #a1a1aa; }
+.perf-toggle-arrow { font-size: 10px; transition: transform 0.15s; }
+.perf-panel {
+  background: #0c0c10;
+  border: 1px solid #1e1e24;
+  border-radius: 10px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  font-size: 12px;
+}
+.perf-stage {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: #18181b;
+  border: 1px solid #27272a;
+  border-radius: 6px;
+  padding: 3px 8px;
+}
+.perf-label { color: #71717a; }
+.perf-value { color: #a1a1aa; font-weight: 600; font-variant-numeric: tabular-nums; }
+.perf-sep { color: #3f3f46; font-size: 11px; }
