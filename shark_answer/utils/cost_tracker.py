@@ -41,16 +41,18 @@ class CostTracker:
             provider_enum,
             {"input": 1.0, "output": 3.0},  # fallback rates
         )
+        in_tok  = response.usage.input_tokens  or 0
+        out_tok = response.usage.output_tokens or 0
         cost = (
-            response.usage.input_tokens * rates["input"] / 1_000_000
-            + response.usage.output_tokens * rates["output"] / 1_000_000
+            in_tok  * rates["input"]  / 1_000_000
+            + out_tok * rates["output"] / 1_000_000
         )
 
         entry = CostEntry(
             provider=response.provider,
             model_name=response.model_name,
-            input_tokens=response.usage.input_tokens,
-            output_tokens=response.usage.output_tokens,
+            input_tokens=in_tok,
+            output_tokens=out_tok,
             cost_usd=cost,
             subject=subject,
             pipeline=pipeline,

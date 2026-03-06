@@ -44,8 +44,8 @@ class ClaudeProvider(BaseProvider):
             provider=self.provider_name,
             model_name=self.model_name,
             usage=TokenUsage(
-                input_tokens=resp.usage.input_tokens,
-                output_tokens=resp.usage.output_tokens,
+                input_tokens=resp.usage.input_tokens  or 0,
+                output_tokens=resp.usage.output_tokens or 0,
             ),
         )
 
@@ -91,7 +91,7 @@ class ClaudeProvider(BaseProvider):
             provider=self.provider_name,
             model_name=self.model_name,
             usage=TokenUsage(
-                input_tokens=resp.usage.input_tokens,
-                output_tokens=resp.usage.output_tokens,
+                input_tokens=resp.usage.input_tokens  or 0,
+                output_tokens=resp.usage.output_tokens or 0,
             ),
         )

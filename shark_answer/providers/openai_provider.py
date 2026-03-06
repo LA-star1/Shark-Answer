@@ -65,8 +65,8 @@ class OpenAIProvider(BaseProvider):
             provider=self.provider_name,
             model_name=self.model_name,
             usage=TokenUsage(
-                input_tokens=usage.prompt_tokens if usage else 0,
-                output_tokens=usage.completion_tokens if usage else 0,
+                input_tokens=(usage.prompt_tokens     or 0) if usage else 0,
+                output_tokens=(usage.completion_tokens or 0) if usage else 0,
             ),
         )
 
@@ -120,7 +120,7 @@ class OpenAIProvider(BaseProvider):
             provider=self.provider_name,
             model_name=self.model_name,
             usage=TokenUsage(
-                input_tokens=usage.prompt_tokens if usage else 0,
-                output_tokens=usage.completion_tokens if usage else 0,
+                input_tokens=(usage.prompt_tokens     or 0) if usage else 0,
+                output_tokens=(usage.completion_tokens or 0) if usage else 0,
             ),
         )
