@@ -145,6 +145,7 @@ def get_context(
     subject: str,
     paper_number: Optional[int] = None,
     question_text: str = "",
+    exclude_year: Optional[int] = None,
 ) -> dict:
     """Retrieve knowledge base context for injection into a model prompt.
 
@@ -152,6 +153,9 @@ def get_context(
         subject:       Subject name or code, e.g. "Physics", "9702", "physics_9702"
         paper_number:  CIE paper component (1–5). None = match all papers.
         question_text: The question being answered (reserved for future topic filtering).
+        exclude_year:  If set, mark schemes/examiner reports from this year are excluded.
+                       Use this for fair benchmarking: set exclude_year=paper_year so the
+                       model cannot see the mark scheme it is being tested against.
 
     Returns a dict with:
         context  (str):  Ready-to-inject context block with section headers.
@@ -197,7 +201,11 @@ def get_context(
     #   grade thresh  → up to  9 000 chars (3 × _MAX_GT_CHARS)
     #   syllabus      → remainder
     ms_entries = data.get("mark_schemes", [])
-    ms_matching = [e for e in ms_entries if _matches_paper(e.get("paper"), paper_number)]
+    ms_matching = [
+        e for e in ms_entries
+        if _matches_paper(e.get("paper"), paper_number)
+        and (exclude_year is None or e.get("year") != exclude_year)
+    ]
     # Sort newest-first, take up to 5
     ms_recent = sorted(ms_matching, key=lambda e: e.get("year", 0), reverse=True)[:5]
 
@@ -227,9 +235,12 @@ def get_context(
                 included["mark_schemes"] = [lbl for _, lbl, _ in subset]
                 break
 
-    # ── 2. Examiner reports: 3 most recent ────────────────────────────────
+    # ── 2. Examiner reports: 3 most recent (respects exclude_year) ────────
     er_entries = sorted(
-        data.get("examiner_reports", []),
+        [
+            e for e in data.get("examiner_reports", [])
+            if exclude_year is None or e.get("year") != exclude_year
+        ],
         key=lambda e: e.get("year", 0),
         reverse=True,
     )[:3]
@@ -257,9 +268,12 @@ def get_context(
                 included["examiner_reports"] = [lbl for _, lbl, _ in subset]
                 break
 
-    # ── 3. Grade thresholds: 3 most recent ────────────────────────────────
+    # ── 3. Grade thresholds: 3 most recent (respects exclude_year) ────────
     gt_entries = sorted(
-        data.get("grade_thresholds", []),
+        [
+            e for e in data.get("grade_thresholds", [])
+            if exclude_year is None or e.get("year") != exclude_year
+        ],
         key=lambda e: e.get("year", 0),
         reverse=True,
     )[:3]
@@ -366,12 +380,22 @@ Write ONLY what earns marks — nothing more.\
 """
 
 
-def build_prompt_context(subject: str, paper_number: Optional[int] = None) -> str:
+def build_prompt_context(
+    subject: str,
+    paper_number: Optional[int] = None,
+    exclude_year: Optional[int] = None,
+) -> str:
     """Return a ready-to-prepend context block for model system prompts.
+
+    Args:
+        subject:      Subject name or code.
+        paper_number: CIE paper component. None = all papers.
+        exclude_year: If set, exclude this year's mark schemes from context.
+                      Pass the paper year for fair (non-leaky) evaluation.
 
     Returns an empty string if no KB data is available (safe to inject regardless).
     """
-    result = get_context(subject=subject, paper_number=paper_number)
+    result = get_context(subject=subject, paper_number=paper_number, exclude_year=exclude_year)
     if not result["context"]:
         return ""
     return _KB_CONTEXT_HEADER.format(context=result["context"])

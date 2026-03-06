@@ -313,6 +313,7 @@ async def _run_pipeline(
             kb_context=kb_context,
             examiner_profile=profile,
             language=lang.value, max_versions=max_versions,
+            paper=paper_number,
         )
     elif pipeline == Pipeline.ESSAY:
         return await run_pipeline_b(
@@ -321,6 +322,7 @@ async def _run_pipeline(
             kb_context=kb_context,
             examiner_profile=profile,
             language=lang.value, max_versions=max_versions,
+            paper=paper_number,
         )
     elif pipeline == Pipeline.CS:
         return await run_pipeline_c(
@@ -329,6 +331,7 @@ async def _run_pipeline(
             kb_context=kb_context,
             examiner_profile=profile,
             language=lang.value, max_versions=max_versions,
+            paper=paper_number,
         )
     else:
         from shark_answer.pipelines.base import PipelineResult as PR

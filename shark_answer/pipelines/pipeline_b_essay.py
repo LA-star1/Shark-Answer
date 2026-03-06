@@ -27,6 +27,7 @@ import logging
 from typing import Optional
 
 from shark_answer.config import AppConfig, ModelProvider, Pipeline, PIPELINE_CONFIG
+from shark_answer.knowledge_base.predictor import build_prediction_context
 from shark_answer.modules.examiner_profile import ExaminerProfile
 from shark_answer.modules.explanation import build_explanation_prompt
 from shark_answer.pipelines.base import AnswerVersion, PipelineResult
@@ -195,6 +196,7 @@ async def run_pipeline_b(
     examiner_profile: Optional[ExaminerProfile] = None,
     language: str = "en",
     max_versions: int = 7,
+    paper: Optional[int] = None,
 ) -> PipelineResult:
     """Run Pipeline B for an essay question."""
     result = PipelineResult(
@@ -203,8 +205,20 @@ async def run_pipeline_b(
         subject=subject,
     )
 
-    # kb_context is pre-built by the caller (app.py) via knowledge_base.retriever
-    marking_context = kb_context
+    # ── Build enriched context: predicted MS + historical reference ─────────
+    prediction_ctx = build_prediction_context(
+        subject=subject,
+        paper=paper or 2,   # essays are almost always Paper 2-4
+        question_text=question.text,
+        marks=question.marks,
+    )
+    if prediction_ctx and kb_context:
+        marking_context = prediction_ctx + "\n\n=== HISTORICAL REFERENCE ===\n" + kb_context
+    elif prediction_ctx:
+        marking_context = prediction_ctx
+    else:
+        # kb_context is pre-built by the caller (app.py) via knowledge_base.retriever
+        marking_context = kb_context
 
     examiner_guidance = ""
     if examiner_profile:

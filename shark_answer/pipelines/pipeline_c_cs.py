@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Optional
 
 from shark_answer.config import AppConfig, Pipeline
+from shark_answer.knowledge_base.predictor import build_prediction_context
 from shark_answer.modules.examiner_profile import ExaminerProfile
 from shark_answer.modules.explanation import build_explanation_prompt
 from shark_answer.pipelines.base import AnswerVersion, PipelineResult
@@ -111,6 +112,7 @@ async def run_pipeline_c(
     examiner_profile: Optional[ExaminerProfile] = None,
     language: str = "en",
     max_versions: int = 5,
+    paper: Optional[int] = None,
 ) -> PipelineResult:
     """Run Pipeline C for a CS question."""
     result = PipelineResult(
@@ -119,8 +121,20 @@ async def run_pipeline_c(
         subject=subject,
     )
 
-    # kb_context is pre-built by the caller (app.py) via knowledge_base.retriever
-    marking_context = kb_context
+    # ── Build enriched context: predicted MS + historical reference ─────────
+    prediction_ctx = build_prediction_context(
+        subject=subject,
+        paper=paper or 1,   # CS Paper 1 (theory) or Paper 2 (algorithms)
+        question_text=question.text,
+        marks=question.marks,
+    )
+    if prediction_ctx and kb_context:
+        marking_context = prediction_ctx + "\n\n=== HISTORICAL REFERENCE ===\n" + kb_context
+    elif prediction_ctx:
+        marking_context = prediction_ctx
+    else:
+        # kb_context is pre-built by the caller (app.py) via knowledge_base.retriever
+        marking_context = kb_context
 
     examiner_guidance = ""
     if examiner_profile:

@@ -408,6 +408,7 @@ async def run_paper_benchmark(
     cost_tracker,
     max_versions: int = 1,
     max_questions: int = 5,
+    fair_mode: bool = True,
 ) -> PaperResult:
     """Run the full benchmark for a single paper."""
     from shark_answer.config import Subject, Language, SUBJECT_PIPELINE_MAP
@@ -494,7 +495,22 @@ async def run_paper_benchmark(
     ms_text = _load_txt(kb_dir, mkey, "mark_schemes", ms_file)
 
     # ── 5. Get KB context (once per paper) ───────────────────────────────────
-    kb_context = build_prompt_context(subject=skey, paper_number=pnum)
+    # Fair mode: exclude the paper year so the model can't see the mark scheme
+    # it's being tested against. Cheat mode: include all years (leaky, inflates scores).
+    paper_year: Optional[int] = None
+    if qp_file:
+        # Extract year from filename like "2024_june_qp_21.pdf" → 2024
+        import re as _re
+        m = _re.match(r"(\d{4})_", qp_file)
+        if m:
+            paper_year = int(m.group(1))
+    exclude_yr = paper_year if fair_mode else None
+    mode_label = "FAIR" if fair_mode else "⚠ CHEAT (data leakage — year included)"
+    print(f"  KB mode: {mode_label}"
+          + (f" (excluding {paper_year})" if exclude_yr else ""), flush=True)
+    kb_context = build_prompt_context(
+        subject=skey, paper_number=pnum, exclude_year=exclude_yr
+    )
 
     # ── 6. Solve each question ────────────────────────────────────────────────
     cost_before_solving = cost_tracker.total_cost
@@ -533,6 +549,7 @@ async def run_paper_benchmark(
                     config=config, cost_tracker=cost_tracker,
                     kb_context=kb_context, language="en",
                     max_versions=max_versions,
+                    paper=pnum,
                 )
             elif pipeline == Pipeline.ESSAY:
                 pipeline_result = await run_pipeline_b(
@@ -540,6 +557,7 @@ async def run_paper_benchmark(
                     config=config, cost_tracker=cost_tracker,
                     kb_context=kb_context, language="en",
                     max_versions=max_versions,
+                    paper=pnum,
                 )
             elif pipeline == Pipeline.CS:
                 pipeline_result = await run_pipeline_c(
@@ -547,6 +565,7 @@ async def run_paper_benchmark(
                     config=config, cost_tracker=cost_tracker,
                     kb_context=kb_context, language="en",
                     max_versions=max_versions,
+                    paper=pnum,
                 )
             else:
                 pipe_errors.append(f"Pipeline {pipeline} not implemented")
@@ -821,6 +840,28 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--verbose", action="store_true",
         help="Enable debug logging",
     )
+
+    # ── Fair / cheat mode ──────────────────────────────────────────────────
+    mode_group = p.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--fair",
+        dest="fair_mode", action="store_true", default=True,
+        help=(
+            "Fair evaluation: exclude the paper year's mark schemes from KB context "
+            "so the model cannot directly see the answer it is scored against. "
+            "(DEFAULT — use this for honest performance measurement)"
+        ),
+    )
+    mode_group.add_argument(
+        "--cheat",
+        dest="fair_mode", action="store_false",
+        help=(
+            "Cheat mode: include ALL years in KB context (data leakage). "
+            "The model can see the exact mark scheme it is being scored against. "
+            "Scores will be inflated. Labelled ⚠ CHEAT in the report."
+        ),
+    )
+
     return p.parse_args(argv)
 
 
@@ -871,10 +912,12 @@ async def _async_main(args: argparse.Namespace) -> int:
 
     max_versions = max(1, min(5, args.versions))
     max_q        = max(1, args.max_questions)
+    fair_mode    = getattr(args, "fair_mode", True)
 
+    mode_str = "FAIR MODE (no data leakage)" if fair_mode else "⚠  CHEAT MODE (data leakage — scores inflated)"
     print(
         f"Benchmark: {len(papers)} paper(s), "
-        f"versions={max_versions}, max_q={max_q}\n"
+        f"versions={max_versions}, max_q={max_q}, mode={mode_str}\n"
         + ("  [QUICK MODE: Economics + Physics only]\n" if args.quick else ""),
         flush=True,
     )
@@ -916,6 +959,7 @@ async def _async_main(args: argparse.Namespace) -> int:
             cost_tracker=cost_tracker,
             max_versions=max_versions,
             max_questions=max_q,
+            fair_mode=fair_mode,
         )
         results.append(result)
 
@@ -937,6 +981,15 @@ async def _async_main(args: argparse.Namespace) -> int:
 
     # ── Generate report ────────────────────────────────────────────────────────
     report = generate_report(results, max_versions, max_q)
+    # Prepend mode header
+    mode_header = (
+        "=" * 72 + "\n"
+        f"  BENCHMARK MODE: {'FAIR (no data leakage)' if fair_mode else '⚠  CHEAT (data leakage — scores INFLATED)'}\n"
+        + ("  Fair mode excludes the paper year from KB context.\n" if fair_mode else
+           "  Cheat mode includes the mark scheme year — NOT a valid performance measure!\n")
+        + "=" * 72 + "\n\n"
+    )
+    report = mode_header + report
     print(report)
 
     # ── Save report ────────────────────────────────────────────────────────────
@@ -945,8 +998,9 @@ async def _async_main(args: argparse.Namespace) -> int:
         out_path = Path(args.output)
     else:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        mode = "quick" if args.quick else (args.subject or "all")
-        out_path = _RESULTS_DIR / f"benchmark_{mode}_{ts}.txt"
+        subject_part = "quick" if args.quick else (args.subject or "all")
+        mode_part = "fair" if fair_mode else "cheat"
+        out_path = _RESULTS_DIR / f"benchmark_{subject_part}_{mode_part}_{ts}.txt"
 
     out_path.write_text(report, encoding="utf-8")
     print(f"\nReport saved to: {out_path}", flush=True)
