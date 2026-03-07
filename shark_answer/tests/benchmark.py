@@ -26,6 +26,7 @@ import argparse
 import asyncio
 import json
 import logging
+import re
 import sys
 import time
 from dataclasses import dataclass, field
@@ -85,13 +86,18 @@ _ALL_PAPERS: list[dict] = [
         "ms_file":       "2024_june_ms_21.pdf",
         "paper_number":  21,
     },
-    {
-        "subject_key":   "chinese",
-        "manifest_key":  "chinese_8238",
-        "qp_file":       None,   # resolved at runtime
-        "ms_file":       None,
-        "paper_number":  None,
-    },
+    # NOTE: Chinese (8238) is intentionally excluded from the default run list.
+    # All 8238 papers are multiple-choice (Paper 1 = Listening, Paper 2 = Reading).
+    # Pipeline B (Essay) is not appropriate for MCQ format.  A dedicated MCQ
+    # pipeline is required before Chinese can be benchmarked.
+    # To run Chinese manually: --subject chinese
+    # {
+    #     "subject_key":   "chinese",
+    #     "manifest_key":  "chinese_8238",
+    #     "qp_file":       None,
+    #     "ms_file":       None,
+    #     "paper_number":  None,
+    # },
 ]
 
 _QUICK_SUBJECTS = {"economics", "physics"}
@@ -266,19 +272,28 @@ Rules:
 - Be strict and accurate — award marks only for points genuinely addressed
 - grade_estimate: A*(≥90%), A(≥80%), B(≥70%), C(≥60%), D(≥50%), E(≥40%), U(<40%)
 - mark_points_hit and mark_points_missed must reference specific MS criteria
+- IMPORTANT: Keep every entry in mark_points_hit and mark_points_missed under 12 words
+- IMPORTANT: Output raw JSON only — do NOT wrap in markdown code fences
 """
 
 
 def _strip_json_fences(text: str) -> str:
-    """Remove markdown ```json ... ``` fences if present."""
+    """Remove markdown ```json ... ``` fences if present.
+
+    Handles all common variants:
+      - ```json\\n{...}\\n```
+      - ```\\n{...}\\n```
+      - leading/trailing whitespace around the fences
+    Uses regex so it degrades gracefully when fences are absent or malformed.
+    """
+    import re
     text = text.strip()
     if text.startswith("```"):
-        lines = text.splitlines()
-        # drop first line (```json or ```) and last line (```)
-        inner = lines[1:] if len(lines) > 1 else lines
-        if inner and inner[-1].strip().startswith("```"):
-            inner = inner[:-1]
-        text = "\n".join(inner).strip()
+        # Strip opening fence (```json or just ```)
+        text = re.sub(r'^```(?:json)?\s*\n?', '', text)
+        # Strip closing fence (``` possibly followed by whitespace/newlines)
+        text = re.sub(r'\n?\s*```\s*$', '', text)
+        text = text.strip()
     return text
 
 
@@ -291,16 +306,26 @@ def _parse_score_response(
     end   = raw.rfind("}") + 1
     if start < 0 or end <= start:
         return None
-    try:
-        data     = json.loads(raw[start:end])
-        achieved = int(data.get("marks_achieved", 0))
-        total    = int(data.get("total_marks", marks))
-        grade    = str(data.get("grade_estimate", "?"))
-        hits     = list(data.get("mark_points_hit", []))
-        misses   = list(data.get("mark_points_missed", []))
-        return achieved, total, grade, hits, misses
-    except (json.JSONDecodeError, ValueError, KeyError):
-        return None
+    fragment = raw[start:end]
+    # ── Attempt to repair truncated JSON (unclosed arrays / object) ───────────
+    # If `end` landed on an inner `}` (truncation), `json.loads` will fail.
+    # We try up to 3 repair attempts by appending missing closing brackets.
+    parse_attempts = [fragment]
+    # Try closing an open array then the object, or just the object
+    if not fragment.rstrip().endswith("}"):
+        parse_attempts += [fragment + ']}', fragment + ']}}\n', fragment + '}']
+    for attempt_text in parse_attempts:
+        try:
+            data     = json.loads(attempt_text)
+            achieved = int(data.get("marks_achieved", 0))
+            total    = int(data.get("total_marks", marks))
+            grade    = str(data.get("grade_estimate", "?"))
+            hits     = list(data.get("mark_points_hit", []))
+            misses   = list(data.get("mark_points_missed", []))
+            return achieved, total, grade, hits, misses
+        except (json.JSONDecodeError, ValueError, KeyError):
+            continue
+    return None
 
 
 async def _bench_score(
@@ -349,8 +374,8 @@ async def _bench_score(
                     scorer_inst.generate(
                         prompt=prompt,
                         system=system,
-                        temperature=0.1,
-                        max_tokens=1024,
+                        temperature=0.0,   # deterministic: same answer = same score
+                        max_tokens=4096,   # 4096 prevents truncation of mark-point lists
                     ),
                     timeout=JUDGE_TIMEOUT,
                 )
@@ -382,7 +407,15 @@ async def _bench_score(
             last_error = f"{scorer_name} parse error"
             logger.warning("  [%s] parse error attempt %d: %.100s",
                            scorer_name, attempt + 1, resp.content)
-            # parse failure: retry once then fall through to next scorer
+            # On parse failure: make second attempt with stricter JSON-only prompt
+            if attempt == 0:
+                prompt = (
+                    f"Question [{marks} marks]:\n{question_text}\n\n"
+                    f"Student answer:\n{answer_text}\n\n"
+                    "IMPORTANT: Respond with ONLY a raw JSON object. "
+                    "No markdown, no explanation, no code fences. "
+                    "Start your response with { and end with }."
+                )
 
         logger.warning("Scorer %s exhausted (%s), trying next in chain", scorer_name, last_error)
 
@@ -453,6 +486,72 @@ def _load_txt(kb_dir: Path, manifest_key: str, category: str, filename: str) -> 
     return ""
 
 
+# ── "Hence" question context injection ─────────────────────────────────────────
+
+import re as _re
+
+_HENCE_RE = _re.compile(
+    r'\b(hence|using (your|the) (answer|result)|using (part|your answer from)|'
+    r'using (the result from)|from (part|your answer)|'
+    r'using (the value|the expression|this result|your result))\b',
+    _re.IGNORECASE,
+)
+
+
+def _is_hence_question(text: str) -> bool:
+    """Return True if the question text implies it needs a prior sub-part answer."""
+    return bool(_HENCE_RE.search(text))
+
+
+def _get_major_question(number: str) -> str:
+    """Extract the top-level question number, e.g. '3' from '3(b)(ii)'."""
+    m = _re.match(r'^(\d+)', number.strip())
+    return m.group(1) if m else number.strip()
+
+
+def _build_hence_context(
+    current_number: str,
+    current_text: str,
+    answered_parts: dict[str, str],
+) -> str:
+    """Build a prior-answer context block for a 'Hence' question.
+
+    Returns an empty string if:
+    - The question is not a 'Hence' question, OR
+    - No prior answers from the same major question group are available.
+
+    Otherwise returns a labelled block ready to prepend to full_paper_text.
+    """
+    if not _is_hence_question(current_text):
+        return ""
+
+    major = _get_major_question(current_number)
+
+    # Collect all answered parts from the same major question (e.g. same Q3)
+    prior: list[tuple[str, str]] = [
+        (num, ans)
+        for num, ans in answered_parts.items()
+        if _get_major_question(num) == major and num != current_number
+    ]
+
+    if not prior:
+        return ""
+
+    # Sort numerically/lexicographically so parts appear in order
+    prior.sort(key=lambda x: x[0])
+
+    lines = [
+        f"=== PRIOR ANSWERS FOR QUESTION {major} ===",
+        "The current question says 'Hence...' — use these earlier answers as input:\n",
+    ]
+    for num, ans in prior:
+        # Truncate very long answers so we don't balloon the prompt
+        display_ans = ans[:2000] + "\n[...truncated]" if len(ans) > 2000 else ans
+        lines.append(f"--- Part {num} answer ---\n{display_ans}")
+
+    return "\n\n".join(lines)
+
+
 # ── Paper benchmark ─────────────────────────────────────────────────────────────
 
 async def run_paper_benchmark(
@@ -466,14 +565,13 @@ async def run_paper_benchmark(
     fair_mode: bool = True,
 ) -> PaperResult:
     """Run the full benchmark for a single paper."""
-    from shark_answer.config import Subject, Language, SUBJECT_PIPELINE_MAP
+    from shark_answer.config import Subject, Language, SUBJECT_PIPELINE_MAP, VISION_ONLY_SUBJECTS
     from shark_answer.pipelines.pipeline_a_science import run_pipeline_a
     from shark_answer.pipelines.pipeline_b_essay import run_pipeline_b
     from shark_answer.pipelines.pipeline_c_cs import run_pipeline_c
     from shark_answer.pipelines.router import route_question
     from shark_answer.knowledge_base.retriever import build_prompt_context
     from shark_answer.utils.file_converter import convert_file_to_images
-    from shark_answer.utils.image_extractor import extract_questions_from_images
     from shark_answer.config import Pipeline
 
     mkey    = paper_def["manifest_key"]
@@ -497,40 +595,86 @@ async def run_paper_benchmark(
         result.error = f"Unknown subject enum value: {skey}"
         return result
 
-    # ── 1. Load QP PDF ────────────────────────────────────────────────────────
+    # ── 1. Load QP text (.txt preferred; PDF as fallback for images) ─────────
     t0 = time.perf_counter()
-    qp_bytes = _load_file_bytes(kb_dir, mkey, "question_papers", qp_file)
-    if qp_bytes is None:
+    from shark_answer.utils.image_extractor import (
+        extract_questions_from_text,
+        extract_questions_from_images,
+        extract_questions_whole_paper,
+    )
+
+    qp_text = _load_txt(kb_dir, mkey, "question_papers", qp_file)  # pre-extracted .txt
+    qp_bytes = _load_file_bytes(kb_dir, mkey, "question_papers", qp_file)  # PDF bytes
+
+    if qp_bytes is None and not qp_text:
         result.error = f"QP not found: {kb_dir / mkey / 'question_papers' / qp_file}"
         return result
 
-    # ── 2. Convert PDF → images ───────────────────────────────────────────────
-    print(f"  [{skey}] Converting PDF to images…", flush=True)
-    try:
-        images = convert_file_to_images(qp_file, qp_bytes)
-    except Exception as exc:
-        result.error = f"PDF→image conversion failed: {exc}"
-        return result
+    # For vision-only subjects (Math, Further Math) PyMuPDF cannot extract
+    # equations — the output is garbled characters.  Skip txt-first entirely and
+    # go straight to vision.  Also clear qp_text so we don't pass garbled text
+    # as pipeline context.
+    force_vision = subject_enum in VISION_ONLY_SUBJECTS
+    if force_vision:
+        qp_text = ""  # don't pass garbled txt as full_paper_text to pipelines
+        print(f"  [{skey}] Vision-only subject — skipping .txt, using image extraction…",
+              flush=True)
 
-    if not images:
-        result.error = "PDF produced no images"
-        return result
+    # ── 2. Extract questions: .txt-first, vision fallback ────────────────────
+    questions: list = []
+    extraction_method = "none"
 
-    # ── 3. Extract questions ──────────────────────────────────────────────────
-    print(f"  [{skey}] Extracting questions from {len(images)} page(s)…", flush=True)
-    try:
-        questions, _ = await extract_questions_from_images(registry, images)
-    except Exception as exc:
-        result.error = f"Question extraction failed: {exc}"
-        return result
+    if qp_text and not force_vision:
+        # PRIMARY: parse questions directly from pre-extracted .txt
+        # Reliable, fast, includes ALL table/figure data — no API calls needed
+        print(f"  [{skey}] Extracting questions from .txt (text-first mode)…", flush=True)
+        try:
+            questions = extract_questions_from_text(qp_text)
+            if questions:
+                extraction_method = "txt"
+                print(f"  [{skey}] Text parser found {len(questions)} question(s).",
+                      flush=True)
+        except Exception as exc:
+            logger.warning("Text extraction failed for %s: %s", qp_file, exc)
+
+    if not questions and qp_bytes:
+        # FALLBACK: vision extraction from PDF images
+        print(f"  [{skey}] Text extraction found 0 questions — "
+              "falling back to vision extraction…", flush=True)
+        try:
+            images = convert_file_to_images(qp_file, qp_bytes)
+        except Exception as exc:
+            result.error = f"PDF→image conversion failed: {exc}"
+            return result
+
+        if not images:
+            result.error = "PDF produced no images"
+            return result
+
+        print(f"  [{skey}] Extracting questions from {len(images)} page(s) via whole-paper vision…",
+              flush=True)
+        try:
+            # Whole-paper extraction: single call with all pages for full context
+            questions, extract_resp = await extract_questions_whole_paper(registry, images, skey)
+            if questions:
+                extraction_method = "whole-paper-vision"
+            elif not questions:
+                # Fallback to page-by-page if whole-paper returned nothing
+                logger.warning("[%s] Whole-paper extraction returned 0 questions — trying page-by-page", skey)
+                questions, _ = await extract_questions_from_images(registry, images)
+                if questions:
+                    extraction_method = "vision"
+        except Exception as exc:
+            result.error = f"Question extraction failed: {exc}"
+            return result
 
     result.timing.extraction_s = time.perf_counter() - t0
 
     if not questions:
-        result.error = "No questions extracted from paper"
+        result.error = "No questions extracted from paper (both txt and vision failed)"
         return result
 
-    # Drop questions with 0 marks — these are cover pages / instructions, not real questions
+    # Drop questions with 0 marks — cover pages / instructions
     real_questions = [q for q in questions if q.marks > 0]
     dropped = len(questions) - len(real_questions)
     if dropped:
@@ -542,8 +686,44 @@ async def run_paper_benchmark(
         result.error = "No scoreable questions extracted (all had 0 marks)"
         return result
 
-    print(f"  [{skey}] {len(questions)} real question(s) found. "
-          f"Processing up to {max_questions}.", flush=True)
+    # ── 2b. Filter phantom question IDs ──────────────────────────────────────
+    # The txt parser can misread numbers from equation labels, data values, or
+    # table entries in the paper body as question numbers, creating phantom IDs
+    # such as "13", "22", "17" that inflate the denominator with questions the
+    # pipeline cannot meaningfully answer.
+    #
+    # Safety rule (txt extraction only — vision extraction is already clean):
+    #   A bare integer > 10 with NO sub-part suffix is almost certainly a phantom.
+    #   Valid CIE top-level question numbers are 1–10; anything higher that has no
+    #   letter/paren suffix (e.g. "13", not "13(a)") is flagged and removed.
+    _BARE_INT_RE = re.compile(r"^\d+$")
+
+    def _is_phantom_qnum(num: str) -> bool:
+        num = num.strip()
+        if _BARE_INT_RE.fullmatch(num):
+            try:
+                return int(num) > 10
+            except ValueError:
+                return False
+        return False
+
+    # Computer Science papers (cs_9618) genuinely have question numbers > 10
+    # (e.g. Q21 is a real 7-mark question).  Only apply the phantom filter to
+    # subjects whose txt parser is known to hallucinate high bare integers.
+    # Physics and chemistry are already vision-only so they never reach here.
+    _PHANTOM_FILTER_SUBJECTS = frozenset({"economics_9708", "biology_9700"})
+    if extraction_method == "txt" and skey in _PHANTOM_FILTER_SUBJECTS:
+        phantom_ids = [q.number for q in questions if _is_phantom_qnum(q.number)]
+        if phantom_ids:
+            questions = [q for q in questions if not _is_phantom_qnum(q.number)]
+            print(
+                f"  [{skey}] Filtered {len(phantom_ids)} phantom question ID(s) "
+                f"(bare integers > 10 from txt parser): {phantom_ids}",
+                flush=True,
+            )
+
+    print(f"  [{skey}] {len(questions)} real question(s) found "
+          f"[via {extraction_method}]. Processing up to {max_questions}.", flush=True)
     questions = questions[:max_questions]
 
     # ── 4. Load MS text ───────────────────────────────────────────────────────
@@ -571,7 +751,14 @@ async def run_paper_benchmark(
     cost_before_solving = cost_tracker.total_cost
     t_solve = time.perf_counter()
 
-    for q in questions:
+    # Tracks best answers already generated this paper, keyed by question number.
+    # Used to inject prior sub-part answers into "Hence..." questions.
+    answered_parts: dict[str, str] = {}
+
+    for qi, q in enumerate(questions):
+        # 10-second pause between questions to avoid API rate limiting
+        if qi > 0:
+            await asyncio.sleep(10)
         q_t0 = time.perf_counter()
         print(f"  [{skey}] Q{q.number} ({q.marks}m) → pipeline…", flush=True)
 
@@ -591,6 +778,16 @@ async def run_paper_benchmark(
             result.questions.append(qr)
             continue
 
+        # Build "Hence" context — prepended to full_paper_text when applicable
+        hence_ctx = _build_hence_context(q.number, q.text, answered_parts)
+        if hence_ctx:
+            print(f"  [{skey}] Q{q.number} — 'Hence' detected, injecting prior answers",
+                  flush=True)
+            # Prepend prior answers, then append the QP text (tables / figures)
+            effective_paper_text = hence_ctx + ("\n\n" + qp_text if qp_text else "")
+        else:
+            effective_paper_text = qp_text
+
         # Run pipeline
         pipe_errors: list[str] = []
         providers_ok:   list[str] = []
@@ -605,6 +802,7 @@ async def run_paper_benchmark(
                     kb_context=kb_context, language="en",
                     max_versions=max_versions,
                     paper=pnum,
+                    full_paper_text=effective_paper_text,
                 )
             elif pipeline == Pipeline.ESSAY:
                 pipeline_result = await run_pipeline_b(
@@ -613,6 +811,7 @@ async def run_paper_benchmark(
                     kb_context=kb_context, language="en",
                     max_versions=max_versions,
                     paper=pnum,
+                    full_paper_text=effective_paper_text,
                 )
             elif pipeline == Pipeline.CS:
                 pipeline_result = await run_pipeline_c(
@@ -621,6 +820,7 @@ async def run_paper_benchmark(
                     kb_context=kb_context, language="en",
                     max_versions=max_versions,
                     paper=pnum,
+                    full_paper_text=effective_paper_text,
                 )
             else:
                 pipe_errors.append(f"Pipeline {pipeline} not implemented")
@@ -639,6 +839,10 @@ async def run_paper_benchmark(
                     providers_ok.append(v.provider)
         elif pipeline_result:
             pipe_errors.extend(pipeline_result.errors)
+
+        # Store answer for future "Hence" questions in the same paper
+        if best_answer:
+            answered_parts[q.number] = best_answer
 
         result.timing.solving_s += time.perf_counter() - q_t0
 
@@ -892,6 +1096,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=f"KB root directory (default: {_DEFAULT_KB_DIR})",
     )
     p.add_argument(
+        "--runs", type=int, default=1, metavar="N",
+        help=(
+            "Number of times to run each paper (default: 1, max: 3). "
+            "When N>1, reports best/worst/avg/stddev and grades on average score."
+        ),
+    )
+    p.add_argument(
         "--verbose", action="store_true",
         help="Enable debug logging",
     )
@@ -968,11 +1179,13 @@ async def _async_main(args: argparse.Namespace) -> int:
     max_versions = max(1, min(5, args.versions))
     max_q        = max(1, args.max_questions)
     fair_mode    = getattr(args, "fair_mode", True)
+    num_runs     = max(1, min(3, getattr(args, "runs", 1)))
 
     mode_str = "FAIR MODE (no data leakage)" if fair_mode else "⚠  CHEAT MODE (data leakage — scores inflated)"
+    runs_str = f", runs={num_runs}" if num_runs > 1 else ""
     print(
         f"Benchmark: {len(papers)} paper(s), "
-        f"versions={max_versions}, max_q={max_q}, mode={mode_str}\n"
+        f"versions={max_versions}, max_q={max_q}, mode={mode_str}{runs_str}\n"
         + ("  [QUICK MODE: Economics + Physics only]\n" if args.quick else ""),
         flush=True,
     )
@@ -1006,25 +1219,71 @@ async def _async_main(args: argparse.Namespace) -> int:
             flush=True,
         )
 
-        result = await run_paper_benchmark(
-            paper_def=resolved,
-            kb_dir=kb_dir,
-            registry=registry,
-            config=config,
-            cost_tracker=cost_tracker,
-            max_versions=max_versions,
-            max_questions=max_q,
-            fair_mode=fair_mode,
-        )
-        results.append(result)
+        # ── Multi-run: run each paper num_runs times ───────────────────────────
+        run_results: list[PaperResult] = []
+        for run_i in range(num_runs):
+            if num_runs > 1:
+                print(f"  [{skey}] Run {run_i + 1}/{num_runs}…", flush=True)
+            result = await run_paper_benchmark(
+                paper_def=resolved,
+                kb_dir=kb_dir,
+                registry=registry,
+                config=config,
+                cost_tracker=cost_tracker,
+                max_versions=max_versions,
+                max_questions=max_q,
+                fair_mode=fair_mode,
+            )
+            run_results.append(result)
 
+            summary = (
+                f"  → {skey} run {run_i+1}: {result.total_achieved}/{result.total_marks} "
+                f"({result.grade})  ${result.cost_usd:.4f}  "
+                f"{result.timing.total_s:.0f}s"
+            )
+            if result.error:
+                summary = f"  → {skey} run {run_i+1}: ERROR — {result.error}"
+            print(summary, flush=True)
+
+        # For single runs: use the result directly
+        # For multi-run: compute stats, use the run whose pct is closest to average
+        if num_runs == 1 or not run_results:
+            final_result = run_results[0] if run_results else PaperResult(
+                subject_key=skey,
+                manifest_key=resolved["manifest_key"],
+                qp_file=str(resolved.get("qp_file") or "?"),
+                ms_file=str(resolved.get("ms_file") or "?"),
+                paper_number=resolved.get("paper_number"),
+                error="No runs completed",
+            )
+        else:
+            valid_runs = [r for r in run_results if not r.error and r.total_marks > 0]
+            if valid_runs:
+                import statistics as _stats
+                pcts = [r.score_pct for r in valid_runs]
+                avg_pct = _stats.mean(pcts)
+                best_pct = max(pcts)
+                worst_pct = min(pcts)
+                stddev = _stats.stdev(pcts) if len(pcts) > 1 else 0.0
+                # Pick the run closest to average
+                final_result = min(valid_runs, key=lambda r: abs(r.score_pct - avg_pct))
+                print(
+                    f"  [{skey}] Multi-run stats: avg={avg_pct:.1f}% "
+                    f"best={best_pct:.1f}% worst={worst_pct:.1f}% "
+                    f"σ={stddev:.1f}%  grade-on-avg={_cie_grade_from_pct(avg_pct)}",
+                    flush=True,
+                )
+            else:
+                final_result = run_results[-1]
+
+        results.append(final_result)
         summary = (
-            f"  → {skey}: {result.total_achieved}/{result.total_marks} "
-            f"({result.grade})  ${result.cost_usd:.4f}  "
-            f"{result.timing.total_s:.0f}s"
+            f"  → {skey}: {final_result.total_achieved}/{final_result.total_marks} "
+            f"({final_result.grade})  ${final_result.cost_usd:.4f}  "
+            f"{final_result.timing.total_s:.0f}s"
         )
-        if result.error:
-            summary = f"  → {skey}: ERROR — {result.error}"
+        if final_result.error:
+            summary = f"  → {skey}: ERROR — {final_result.error}"
         print(summary, flush=True)
 
     elapsed = time.perf_counter() - t_global
@@ -1093,6 +1352,8 @@ async def _async_main(args: argparse.Namespace) -> int:
                     "providers_ok":   q.providers_ok,
                     "providers_fail": q.providers_fail,
                     "errors":         q.errors,
+                    "text":           q.text,
+                    "best_answer":    q.best_answer,
                 }
                 for q in r.questions
             ],

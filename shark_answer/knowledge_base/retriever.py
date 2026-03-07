@@ -26,6 +26,10 @@ KB_DIR: Path = Path(
     os.getenv("SHARK_ANSWER_KB_DIR", str(_DEFAULT_KB_DIR))
 ).expanduser()
 
+# ── Subject rules directory (ships with the package, not in KB_DIR) ────────
+# Located at shark_answer/knowledge_base/subject_rules/{subject_key}_rules.txt
+_RULES_DIR: Path = Path(__file__).parent / "subject_rules"
+
 # ── Subject normalizer: any common name / code → manifest key ─────────────
 _SUBJECT_MAP: dict[str, str] = {
     # Display names (lowercase)
@@ -173,6 +177,7 @@ def get_context(
     budget = _TOKEN_BUDGET_CHARS
     sections: list[str] = []
     included: dict = {
+        "subject_rules":      False,
         "mark_schemes":       [],
         "examiner_reports":   [],
         "grade_thresholds":   [],
@@ -180,6 +185,22 @@ def get_context(
         "ci":                 [],
         "subject_summary":    False,
     }
+
+    # ── -1. Subject rules (highest priority — must appear first in context) ──
+    # Loaded from shark_answer/knowledge_base/subject_rules/{subject_key}_rules.txt
+    # These encode exact CIE terminology that overrides any model defaults.
+    rules_path = _RULES_DIR / f"{subject_key}_rules.txt"
+    if rules_path.exists():
+        try:
+            rules_text = rules_path.read_text(encoding="utf-8", errors="replace").strip()
+            if rules_text and budget > _MIN_SECTION_CHARS:
+                block = f"=== SUBJECT TERMINOLOGY RULES (HIGHEST PRIORITY) ===\n{rules_text}"
+                sections.append(block)
+                budget -= len(block)
+                included["subject_rules"] = True
+                logger.debug("Loaded subject rules from %s (%d chars)", rules_path, len(rules_text))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not read subject rules %s: %s", rules_path, exc)
 
     # ── 0. Subject-level examiner summary (pre-built by build_summaries.py) ─
     summary_path = KB_DIR / subject_key / "subject_summary.txt"

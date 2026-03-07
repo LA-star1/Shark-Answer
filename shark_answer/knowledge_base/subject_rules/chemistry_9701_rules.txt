@@ -1,0 +1,151 @@
+CIE A-Level Chemistry (9701) — Examiner-Approved Terminology Rules
+=======================================================================
+These rules encode EXACT wording required by CIE mark schemes.
+Deviating from these terms will lose marks even if the underlying
+understanding is correct. Apply them precisely in every answer.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 1: HALOGEN COLOURS AT 293 K (room temperature)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CRITICAL: The question asks for colour of the ELEMENT at 293 K (solid/liquid/gas
+as it naturally exists at room temperature and pressure).
+
+  Halogen     Physical state at 293 K    CIE-required colour
+  ─────────   ───────────────────────    ───────────────────
+  Fluorine    gas                        pale yellow (accept: yellow)
+  Chlorine    gas                        green (accept: yellow-green, greenish-yellow)
+  Bromine     liquid                     brown (accept: red-brown, dark red)
+  Iodine      SOLID                      (dark) grey  ← CRITICAL: NOT violet/purple
+  Astatine    solid                      (dark) grey / black
+
+⚠️  COMMON MODEL ERROR — IODINE:
+    "violet" / "purple" = colour of IODINE VAPOUR or iodine in non-polar solvents
+    At 293 K, iodine exists as a SOLID → colour = (dark) GREY (with metallic lustre)
+    Writing "violet" for iodine at 293 K = WRONG → 0 marks for the whole table row
+
+⚠️  ALL THREE must be correct for the mark:
+    If chlorine, bromine AND iodine colours are all required in one question,
+    CIE awards the mark only when ALL THREE are correct simultaneously.
+
+Halogen colour in solution (separate from physical state questions):
+  Chlorine water:           pale yellow / yellow-green
+  Bromine water:            orange / yellow-orange
+  Iodine in water:          brown (trace amounts give yellow)
+  Iodine in cyclohexane:    violet / purple  (non-polar solvent → violet)
+  Iodine in KI(aq):         brown (triiodide I₃⁻ complex)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 2: HALOGEN REACTIVITY AND DISPLACEMENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Oxidising power order (strongest first):  F₂ > Cl₂ > Br₂ > I₂
+
+Displacement reactions (more reactive halogen displaces less reactive halide):
+  Cl₂ + 2Br⁻ → 2Cl⁻ + Br₂    (chlorine displaces bromide)
+  Cl₂ + 2I⁻  → 2Cl⁻ + I₂     (chlorine displaces iodide)
+  Br₂ + 2I⁻  → 2Br⁻ + I₂     (bromine displaces iodide)
+  Br₂ does NOT displace Cl⁻ (bromine is weaker oxidising agent than chlorine)
+  I₂ does NOT displace Cl⁻ or Br⁻
+
+Halide reducing power order (strongest reducer first): I⁻ > Br⁻ > Cl⁻ > F⁻
+
+Reactions of halides with concentrated H₂SO₄:
+  NaF/NaCl + conc H₂SO₄:  produces HF/HCl only (no redox; F⁻, Cl⁻ too weak reducers)
+  NaBr + conc H₂SO₄:       HBr + SO₂ + Br₂ + H₂O  (Br⁻ reduces S(VI) to S(IV))
+  NaI + conc H₂SO₄:        HI + H₂S + I₂ + SO₂ + S  (I⁻ reduces S all the way to H₂S)
+
+CIE required observation for NaI + conc H₂SO₄:
+  "Purple/violet fumes" (iodine vapour), "yellow solid" (sulphur), "rotten egg smell" (H₂S)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 3: ACID-BASE AND IONIC EQUILIBRIA TERMINOLOGY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Buffer solution definition (CIE-approved):
+  "A solution that resists changes in pH when small amounts of acid or alkali
+   are added."  [NOT "maintains constant pH" — that is penalised]
+
+Strong acid definition: "An acid that is FULLY/COMPLETELY dissociated in aqueous
+  solution." (NOT "ionised" alone without "completely")
+
+Weak acid definition: "An acid that is PARTIALLY dissociated in aqueous solution."
+
+Le Chatelier's Principle (must include all three elements to gain full credit):
+  "When a system at equilibrium is subjected to a change [in concentration /
+   temperature / pressure], the equilibrium shifts in the direction that
+   opposes / minimises the effect of that change."
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 4: ELECTRONEGATIVITY AND BONDING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Electronegativity trend: increases across a period, decreases down a group.
+Most electronegative element: Fluorine (F).
+
+Hydrogen bonding requirements (CIE mark scheme checklist):
+  ✓ Bond between H and a highly electronegative atom (N, O, or F)
+  ✓ Lone pair on N, O, or F of the ACCEPTOR molecule
+  ✓ Drawn as dashed line H···X (X = N, O, F) — NOT a solid line
+  ✓ Correct directionality shown (lone pair → H)
+
+van der Waals / London dispersion forces:
+  Correct term: "instantaneous dipole – induced dipole forces"  (or London forces)
+  NOT acceptable alone: "van der Waals" without further qualification when
+  the question specifically asks about the type of intermolecular force.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 5: ORGANIC CHEMISTRY MECHANISMS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Mechanism labels must match CIE terminology exactly:
+  Electrophilic addition (EA):       alkenes + Br₂, HBr, H₂O(H⁺)
+  Electrophilic substitution (ES):   benzene + Br₂(AlBr₃), HNO₃(H₂SO₄)
+  Nucleophilic substitution (NS):    halogenoalkanes + NaOH, KCN, NH₃
+  Nucleophilic addition (NA):        aldehydes/ketones + HCN, NaBH₄
+  Free-radical substitution (FRS):   alkanes + Cl₂/Br₂ (UV light)
+  Elimination:                       halogenoalkanes + KOH/ethanol (hot, conc)
+
+Curly arrow rules (penalised if wrong):
+  ✓ Arrow FROM lone pair or bond TO electrophile / new bond
+  ✓ Arrow head points to where electrons GO
+  ✗ Arrows must NOT come from atoms — they come from electron pairs/bonds
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 6: KINETICS AND ENERGETICS PRECISION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Activation energy definition:
+  "The minimum energy required for a reaction to occur." OR
+  "The minimum energy that colliding particles must have for a successful collision."
+
+Catalyst mechanism (must state both effects):
+  "A catalyst provides an alternative reaction pathway of lower activation energy."
+  [Must mention BOTH 'alternative pathway' AND 'lower activation energy']
+
+Rate-determining step: the SLOWEST step in a reaction mechanism.
+  Order of reaction = sum of powers of concentrations in the rate-determining step.
+
+Enthalpy change of formation: "The enthalpy change when ONE MOLE of a compound
+  is formed from its elements in their standard states under standard conditions
+  (298 K, 100 kPa)."
+
+Hess's Law: "The enthalpy change of a reaction is independent of the route taken,
+  provided the initial and final states are the same."
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 7: FREQUENTLY PENALISED MISTAKES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+The following phrasings are PENALISED by CIE examiners:
+
+  ✗ "The reaction speeds up" → say "the rate of reaction increases"
+  ✗ "More concentrated" for gases → say "higher pressure" or "greater concentration"
+  ✗ "Iodine is violet" (solid state) → say "iodine is (dark) grey"
+  ✗ "Strong acid has low pH" → state "completely dissociated"
+  ✗ "The equilibrium moves right" alone → add "to increase [product/reactant]"
+  ✗ "Atoms" when you mean "ions" in ionic equations
+  ✗ Omitting state symbols when the question says "give state symbols"
+  ✗ "Shared pair of electrons" for dative bonds → say "coordinate bond" or
+    "dative covalent bond" (both electrons donated by one atom)
+  ✗ Drawing structural formulae without showing all bonds when "displayed formula"
+    is requested

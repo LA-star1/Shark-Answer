@@ -104,6 +104,51 @@ The models DISAGREE on the answer. Analyze each approach:
 Output the CORRECT solution with clear explanation of where the error occurred."""
 
 
+
+def _get_models_for_marks(
+    marks: int,
+    config: "AppConfig",
+) -> tuple[list["ModelProvider"], float | None]:
+    """Return (model_list, timeout_seconds) based on question mark count.
+
+    Smart routing: appropriate models per mark count.
+    NEVER hard-caps timeouts — always returns None so that per-model
+    defaults from MODEL_TIMEOUTS are used (o3-pro=180s, deepseek=120s, …).
+    Reasoning models must never be cut short regardless of question size.
+    """
+    from shark_answer.config import Pipeline
+
+    if marks == 1:
+        # 1-mark: fast models only — o3-pro is overkill for single-mark questions
+        order = [ModelProvider.CLAUDE, ModelProvider.DEEPSEEK, ModelProvider.GEMINI]
+    elif marks <= 3:
+        # 2-3 marks: include o3-pro for multi-step short questions
+        order = [
+            ModelProvider.O3PRO,    ModelProvider.CLAUDE,
+            ModelProvider.DEEPSEEK, ModelProvider.GEMINI,
+        ]
+    elif marks <= 6:
+        # Medium questions (4-6m): full reasoning ensemble
+        order = [
+            ModelProvider.O3PRO,    ModelProvider.DEEPSEEK,
+            ModelProvider.QWEN,     ModelProvider.CLAUDE,
+            ModelProvider.GEMINI,
+        ]
+    else:
+        # Long/hard questions (7+ m): full arsenal
+        order = [
+            ModelProvider.O3PRO,    ModelProvider.DEEPSEEK,
+            ModelProvider.QWEN,     ModelProvider.CLAUDE,
+            ModelProvider.GEMINI,
+        ]
+
+    available = config.get_available_models(order)
+    if not available:
+        # Fallback: whatever is configured for Pipeline A primary
+        available = config.get_pipeline_models(Pipeline.SCIENCE_MATH, "primary")
+    # NEVER hard-cap timeouts: return None so per-model defaults (MODEL_TIMEOUTS) apply
+    return available, None
+
 async def run_pipeline_a(
     question: ExtractedQuestion,
     subject: str,
@@ -115,6 +160,7 @@ async def run_pipeline_a(
     language: str = "en",
     max_versions: int = 5,
     paper: Optional[int] = None,
+    full_paper_text: str = "",
 ) -> PipelineResult:
     """Run Pipeline A for a science/math question."""
     result = PipelineResult(
@@ -138,6 +184,16 @@ async def run_pipeline_a(
     else:
         # kb_context is pre-built by the caller (app.py) via knowledge_base.retriever
         marking_context = kb_context
+
+    # ── Prepend full paper text so models can look up tables/figures ──────────
+    if full_paper_text:
+        paper_ctx = (
+            "=== QUESTION PAPER TEXT (use any tables, figures, or data referenced "
+            "in the question from this source) ===\n"
+            + full_paper_text[:8000]
+            + "\n"
+        )
+        marking_context = paper_ctx + (("\n" + marking_context) if marking_context else "")
 
     examiner_guidance = ""
     if examiner_profile:
@@ -168,24 +224,27 @@ async def run_pipeline_a(
         return result
 
     # ── Route by marks ─────────────────────────────────────────────────────
-    # SHORT PATH (1–3 marks): 2 models, SHORT_TIMEOUT (30 s), no debate,
-    # no alternative methods.  These questions need one brief precise answer.
+    # SHORT PATH (1–3 marks): smart-routed models, no debate, no alternative methods.
     if question.marks <= 3:
-        short_models = primary_models[:2]
-        logger.info("Pipeline A [SHORT path, %dm]: %d models solving Q%s",
-                    question.marks, len(short_models), question.number)
+        short_models, short_timeout = _get_models_for_marks(question.marks, config)
+        logger.info("Pipeline A [SHORT path, %dm]: %d models solving Q%s (timeout=%s)",
+                    question.marks, len(short_models), question.number, short_timeout)
         responses = await registry.call_models_parallel(
             providers=short_models,
             prompt=question_prompt,
             system=system_prompt,
             temperature=0.3,
             max_tokens=1024,
-            timeout=SHORT_TIMEOUT,
+            timeout=short_timeout,
         )
         cost_tracker.record_batch(responses, subject, "A")
-        successful = [(m, r) for m, r in zip(short_models, responses) if r.success]
+        # Filter out both API failures (r.success=False) AND empty responses
+        # (r.content="" happens when a model returns a success status but no text,
+        # e.g. Gemini returning None content on ambiguous vision-extracted questions).
+        successful = [(m, r) for m, r in zip(short_models, responses)
+                      if r.success and r.content.strip()]
         if not successful:
-            result.errors.append("Short path: all models failed")
+            result.errors.append("Short path: all models failed or returned empty")
             return result
         for i, (model, resp) in enumerate(successful):
             result.versions.append(AnswerVersion(
@@ -206,28 +265,31 @@ async def run_pipeline_a(
                 system="You are a CIE A-Level tutor. Write a brief study note.",
                 temperature=0.4,
                 max_tokens=800,
-                timeout=SHORT_TIMEOUT,
+                # timeout=None → per-model defaults
             )
             cost_tracker.record_batch(ep_resp, subject, "A-explain")
             if ep_resp[0].success:
                 result.versions[0].explanation_text = ep_resp[0].content
         return result
 
-    # FULL PATH (4+ marks): all primary models, optional debate, alt methods
-    logger.info("Pipeline A [FULL path, %dm]: %d models solving Q%s",
-                question.marks, len(primary_models), question.number)
+    # FULL PATH (4+ marks): smart-routed models, optional debate, alt methods
+    smart_models, smart_timeout = _get_models_for_marks(question.marks, config)
+    logger.info("Pipeline A [FULL path, %dm]: %d models solving Q%s (timeout=%s)",
+                question.marks, len(smart_models), question.number, smart_timeout)
     responses = await registry.call_models_parallel(
-        providers=primary_models,
+        providers=smart_models,
         prompt=question_prompt,
         system=system_prompt,
         temperature=0.3,
         max_tokens=4096,
+        timeout=smart_timeout,
     )
     cost_tracker.record_batch(responses, subject, "A")
 
-    successful = [(m, r) for m, r in zip(primary_models, responses) if r.success]
+    successful = [(m, r) for m, r in zip(smart_models, responses)
+                  if r.success and r.content.strip()]
     if not successful:
-        result.errors.append("All primary models failed")
+        result.errors.append("All primary models failed or returned empty")
         return result
 
     # Step 2: Check agreement (for calculation questions)
@@ -312,7 +374,7 @@ async def run_pipeline_a(
                 f"Already solved with this approach:\n{best_answer}\n\n"
                 f"Now solve using a COMPLETELY DIFFERENT method.{lang_suffix}"
             )
-            alt_model = primary_models[0]
+            alt_model = smart_models[0] if smart_models else primary_models[0]
             alt_response = await registry.call_models_parallel(
                 providers=[alt_model],
                 prompt=alt_prompt,
@@ -334,7 +396,8 @@ async def run_pipeline_a(
                 result.versions.append(version)
 
     # Step 6: Generate explanations for each version
-    explain_model = primary_models[0]
+    explain_model = (smart_models[0] if 'smart_models' in dir() and smart_models
+                     else primary_models[0])
     for version in result.versions:
         explain_prompt = build_explanation_prompt(
             Pipeline.SCIENCE_MATH, question.text, version.answer_text, language

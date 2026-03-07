@@ -215,6 +215,7 @@ async def _run_b_short_path(
     marking_context: str,
     language: str,
     lang_suffix: str,
+    full_paper_text: str = "",
 ) -> "PipelineResult":
     """Fast path for 1–3 mark questions.
 
@@ -222,16 +223,26 @@ async def _run_b_short_path(
     brainstorming, no humanisation, no judge.  If both primary models fail,
     falls back to Gemini.  Target latency: ≤ 30 seconds.
     """
-    short_prompt = (
-        f"Question [{question.marks} marks]:\n{question.text}\n\n"
-        f"Give a precise answer in {question.marks} sentence(s) maximum. "
-        f"Use exact CIE A-Level {subject} terminology. No elaboration.{lang_suffix}"
-    )
+    # Build system context — prepend full paper text so tables/figures are visible
+    paper_block = ""
+    if full_paper_text:
+        paper_block = (
+            "=== QUESTION PAPER TEXT (use any tables, figures, or data referenced "
+            "in the question from this source) ===\n"
+            + full_paper_text[:6000]
+            + "\n\n"
+        )
     short_sys = (
         f"You are writing a CIE A-Level {subject} exam answer. "
         f"This is a {question.marks}-mark short-answer question. "
         f"Be precise and use correct terminology.\n\n"
+        + paper_block
         + (marking_context[:2000] if marking_context else "")
+    )
+    short_prompt = (
+        f"Question [{question.marks} marks]:\n{question.text}\n\n"
+        f"Give a precise answer in {question.marks} sentence(s) maximum. "
+        f"Use exact CIE A-Level {subject} terminology. No elaboration.{lang_suffix}"
     )
 
     primary = [ModelProvider.CLAUDE, ModelProvider.GPT4O]
@@ -286,6 +297,48 @@ async def _run_b_short_path(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+def _get_essay_models_for_marks(
+    marks: int,
+    config: "AppConfig",
+) -> tuple[list["ModelProvider"], float]:
+    """Return (model_list, draft_timeout_s) based on essay question mark count.
+
+    Smart routing for Pipeline B: fewer models for lower-mark questions,
+    full ensemble only for 7+ mark essays.  This mirrors the Pipeline A
+    smart-routing philosophy while being appropriate for essay writing
+    (o3-pro is excluded — it is a math reasoning model, not an essay writer).
+    """
+    if marks <= 2:
+        order = [ModelProvider.DEEPSEEK, ModelProvider.GEMINI, ModelProvider.CLAUDE]
+        timeout = 30.0
+    elif marks <= 4:
+        # 3-4 marks: 3 fast essay models
+        order = [ModelProvider.CLAUDE, ModelProvider.DEEPSEEK, ModelProvider.GEMINI]
+        timeout = 45.0
+    elif marks <= 6:
+        # 5-6 marks: 4 models with GLM included
+        order = [
+            ModelProvider.CLAUDE, ModelProvider.GEMINI,
+            ModelProvider.DEEPSEEK, ModelProvider.GLM,
+        ]
+        timeout = 60.0
+    else:
+        # 7+ marks: full essay ensemble
+        order = [
+            ModelProvider.CLAUDE, ModelProvider.GPT4O, ModelProvider.GEMINI,
+            ModelProvider.DEEPSEEK, ModelProvider.QWEN, ModelProvider.GLM,
+        ]
+        timeout = SOLVER_TIMEOUT
+
+    available = config.get_available_models(order)
+    if not available:
+        available = config.get_available_models([
+            ModelProvider.CLAUDE, ModelProvider.GPT4O,
+            ModelProvider.GEMINI, ModelProvider.DEEPSEEK,
+        ])
+    return available, timeout
+
+
 # MEDIUM PATH  (4–6 marks)
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -301,6 +354,7 @@ async def _run_b_medium_path(
     language: str,
     lang_suffix: str,
     max_versions: int,
+    full_paper_text: str = "",
 ) -> "PipelineResult":
     """Medium path for 4–6 mark questions.
 
@@ -308,25 +362,33 @@ async def _run_b_medium_path(
     (no angle brainstorm) and a quick parallel judge round.  No humanisation.
     Timeout: JUDGE_TIMEOUT (45 s) per draft call.
     """
-    medium_priority = [
-        ModelProvider.CLAUDE, ModelProvider.GPT4O,
-        ModelProvider.GEMINI, ModelProvider.DEEPSEEK,
-    ]
-    medium_models = config.get_available_models(medium_priority)
+    medium_models, med_draft_timeout = _get_essay_models_for_marks(question.marks, config)
     if not medium_models:
         # Fallback to any configured model
         medium_models = config.get_available_models([
             ModelProvider.KIMI, ModelProvider.GLM, ModelProvider.MINIMAX,
         ])
+        med_draft_timeout = JUDGE_TIMEOUT
     if not medium_models:
         result.errors.append("Medium path: no models configured")
         return result
 
+    logger.info("Pipeline B [MEDIUM path, %dm]: %d models (timeout=%.0fs)",
+                question.marks, len(medium_models), med_draft_timeout)
     word_target = question.marks * 60   # ~240 w for 4 m, 360 w for 6 m
+    paper_block = ""
+    if full_paper_text:
+        paper_block = (
+            "=== QUESTION PAPER TEXT (use any tables, figures, or data referenced "
+            "in the question from this source) ===\n"
+            + full_paper_text[:6000]
+            + "\n\n"
+        )
     med_sys = (
         f"You are writing a CIE A-Level {subject} exam answer.\n"
         f"This is a {question.marks}-mark question. "
         f"Write a complete, well-structured answer using precise terminology.\n\n"
+        + paper_block
         + (marking_context[:8000] if marking_context else "")
         + (f"\n{examiner_guidance}" if examiner_guidance else "")
     )
@@ -345,10 +407,10 @@ async def _run_b_medium_path(
                     prompt=med_prompt, system=med_sys,
                     temperature=0.5, max_tokens=2000,
                 ),
-                timeout=JUDGE_TIMEOUT,   # 45 s — medium questions, shorter than full drafts
+                timeout=med_draft_timeout,   # smart-routed: 30-60s based on marks
             )
         except asyncio.TimeoutError:
-            logger.warning("[%s] medium draft timed out after %.0fs", model.value, JUDGE_TIMEOUT)
+            logger.warning("[%s] medium draft timed out after %.0fs", model.value, med_draft_timeout)
             return model, None
         cost_tracker.record(resp, subject, "B-med-draft")
         return model, (resp.content if resp.success else None)
@@ -401,6 +463,7 @@ async def run_pipeline_b(
     language: str = "en",
     max_versions: int = 7,
     paper: Optional[int] = None,
+    full_paper_text: str = "",
 ) -> PipelineResult:
     """Run Pipeline B for an essay question."""
     result = PipelineResult(
@@ -438,6 +501,7 @@ async def run_pipeline_b(
         return await _run_b_short_path(
             result, question, subject, registry, cost_tracker,
             marking_context, language, lang_suffix,
+            full_paper_text=full_paper_text,
         )
     if marks <= 6:
         # MEDIUM PATH — 3–4 models, direct draft, quick judge, target ≤60 s
@@ -445,10 +509,21 @@ async def run_pipeline_b(
         return await _run_b_medium_path(
             result, question, subject, registry, config, cost_tracker,
             marking_context, examiner_guidance, language, lang_suffix, max_versions,
+            full_paper_text=full_paper_text,
         )
 
     # FULL PATH (7+ marks) — multi-angle, full judge, humanise
     logger.info("Pipeline B [FULL path, %dm]: Q%s", marks, question.number)
+
+    # Inject full paper text into marking_context for full path too
+    if full_paper_text:
+        paper_block = (
+            "=== QUESTION PAPER TEXT (use any tables, figures, or data referenced "
+            "in the question from this source) ===\n"
+            + full_paper_text[:6000]
+            + "\n\n"
+        )
+        marking_context = paper_block + marking_context
 
     # Build ordered list of (model, angle) for available configured models
     all_angle_models = config.get_available_models(list(_ESSAY_MODEL_ANGLES.keys()))

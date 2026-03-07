@@ -113,6 +113,7 @@ async def run_pipeline_c(
     language: str = "en",
     max_versions: int = 5,
     paper: Optional[int] = None,
+    full_paper_text: str = "",
 ) -> PipelineResult:
     """Run Pipeline C for a CS question."""
     result = PipelineResult(
@@ -135,6 +136,16 @@ async def run_pipeline_c(
     else:
         # kb_context is pre-built by the caller (app.py) via knowledge_base.retriever
         marking_context = kb_context
+
+    # ── Prepend full paper text so models can look up tables/figures ──────────
+    if full_paper_text:
+        paper_ctx = (
+            "=== QUESTION PAPER TEXT (use any tables, figures, or data referenced "
+            "in the question from this source) ===\n"
+            + full_paper_text[:8000]
+            + "\n"
+        )
+        marking_context = paper_ctx + (("\n" + marking_context) if marking_context else "")
 
     examiner_guidance = ""
     if examiner_profile:

@@ -21,6 +21,7 @@ class Subject(str, Enum):
     FURTHER_MATH = "further_math"
     ECONOMICS = "economics"
     COMPUTER_SCIENCE = "computer_science"
+    CHINESE = "chinese"
 
 
 class Pipeline(str, Enum):
@@ -44,16 +45,36 @@ SUBJECT_PIPELINE_MAP: dict[Subject, Pipeline] = {
     Subject.FURTHER_MATH: Pipeline.SCIENCE_MATH,
     Subject.ECONOMICS: Pipeline.ESSAY,
     Subject.COMPUTER_SCIENCE: Pipeline.CS,
+    # NOTE: Chinese (8238) uses Pipeline.ESSAY as a placeholder.
+    # All 8238 papers are multiple-choice (MCQ) format — Listening and Reading.
+    # A dedicated MCQ pipeline is needed before Chinese can be properly supported.
+    Subject.CHINESE: Pipeline.ESSAY,
 }
+
+# Subjects where PyMuPDF text extraction is unreliable.  Two reasons:
+#   (a) Equations / MathML / vector graphics that fitz cannot convert to text
+#       → garbled characters in the extracted .txt file (Math, Further Math).
+#   (b) The .txt parser misinterprets numbers found in the paper body (equation
+#       labels, data values, option numbers) as question numbers, producing
+#       phantom IDs like "13", "22", "17" that inflate the benchmark denominator
+#       → Physics and Chemistry suffer from this.
+# For all these subjects the benchmark and production app always use vision-based
+# question extraction (PDF → images → Gemini/Claude/GPT-4o) instead of .txt.
+VISION_ONLY_SUBJECTS: frozenset[Subject] = frozenset({
+    Subject.MATH,
+    Subject.FURTHER_MATH,
+    Subject.PHYSICS,
+    Subject.CHEMISTRY,
+})
 
 
 class ModelProvider(str, Enum):
-    CLAUDE   = "claude"    # Anthropic  — claude-opus-4-5
+    CLAUDE   = "claude"    # Anthropic  — claude-opus-4-6
     GPT4O    = "gpt4o"     # OpenAI     — gpt-4o  (vision-safe, essays / general)
-    O3PRO    = "o3pro"     # OpenAI     — o3-mini (temp; revert to o3-pro after org verify)
-    DEEPSEEK = "deepseek"  # DeepSeek   — deepseek-reasoner (CoT/thinking, Pipeline A)
+    O3PRO    = "o3pro"     # OpenAI     — o3-pro  (Responses API; fallback → o3)
+    DEEPSEEK = "deepseek"  # DeepSeek   — deepseek-reasoner (R1, IMO gold medal)
     GEMINI   = "gemini"    # Google     — gemini-2.5-pro
-    QWEN     = "qwen"      # Alibaba    — qwen3.5-plus
+    QWEN     = "qwen"      # Alibaba    — qwq-plus (dedicated reasoning model)
     GROK     = "grok"      # xAI        — DISABLED (grok-2-vision-1212 returns 404)
     MINIMAX  = "minimax"   # MiniMax    — MiniMax-Text-01
     KIMI     = "kimi"      # Moonshot   — moonshot-v1-128k
@@ -70,17 +91,18 @@ class ModelProvider(str, Enum):
 #
 PIPELINE_CONFIG: dict[str, dict] = {
     "A_science": {
-        # o3-mini (temp / o3-pro after org verify): strong math reasoning
-        # deepseek: strong STEM competitor (IMO/IOI-level)
-        # gemini-3.1-pro-preview: top GPQA science benchmark
-        # claude: solver + dispute judge
-        # glm: strong all-rounder supplement
+        # Reasoning-first priority for math/science calculation questions:
+        # 1. o3-pro        — strongest math, AIME near-perfect (Responses API)
+        # 2. deepseek-reasoner — R1, IMO gold medal level, extended CoT
+        # 3. qwq-plus      — Qwen dedicated reasoning model, strong at math
+        # 4. claude opus   — judge + solver, top GPQA science benchmark
+        # 5. gemini-2.5-pro — strong science solver / backup
         "solvers": [
             ModelProvider.O3PRO,
             ModelProvider.DEEPSEEK,
-            ModelProvider.GEMINI,
+            ModelProvider.QWEN,
             ModelProvider.CLAUDE,
-            ModelProvider.GLM,
+            ModelProvider.GEMINI,
         ],
         "judge": ModelProvider.CLAUDE,
     },
@@ -139,8 +161,8 @@ PIPELINE_MODEL_CONFIG: dict[Pipeline, dict[str, list[ModelProvider]]] = {
 
 # Cost per 1M tokens (input/output) in USD — approximate, update as pricing changes
 MODEL_COST_PER_M_TOKENS: dict[ModelProvider, dict[str, float]] = {
-    ModelProvider.CLAUDE:   {"input": 15.00, "output": 75.00},   # Opus 4.6 pricing estimate
-    ModelProvider.GPT4O:    {"input": 10.00, "output": 30.00},   # GPT-5.2 pricing estimate
+    ModelProvider.CLAUDE:   {"input": 15.00, "output": 75.00},   # claude-opus-4-6
+    ModelProvider.GPT4O:    {"input":  2.50, "output": 10.00},   # gpt-4o current pricing
     ModelProvider.O3PRO:    {"input": 20.00, "output": 80.00},   # o3-pro pricing estimate
     ModelProvider.DEEPSEEK: {"input":  0.27, "output":  1.10},
     ModelProvider.GEMINI:   {"input":  1.25, "output":  5.00},

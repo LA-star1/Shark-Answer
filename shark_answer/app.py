@@ -22,7 +22,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from shark_answer.config import (
-    AppConfig, Language, Pipeline, Subject, SUBJECT_PIPELINE_MAP,
+    AppConfig, Language, Pipeline, Subject, SUBJECT_PIPELINE_MAP, VISION_ONLY_SUBJECTS,
 )
 from shark_answer.knowledge_base.retriever import build_prompt_context
 from shark_answer.modules.examiner_profile import ExaminerProfileManager
@@ -37,8 +37,29 @@ from shark_answer.utils.cost_tracker import CostTracker
 from shark_answer.utils.file_converter import convert_file_to_images
 from shark_answer.utils.image_extractor import (
     extract_questions_from_images,
+    extract_questions_whole_paper,
     ExtractedQuestion,
 )
+
+
+def _extract_text_from_pdf_bytes(data: bytes) -> str:
+    """Extract plain text from PDF bytes using PyMuPDF (fitz).
+
+    Returns an empty string on any error — this is best-effort context,
+    not a hard requirement.
+    """
+    try:
+        import fitz  # PyMuPDF
+        doc = fitz.open(stream=data, filetype="pdf")
+        parts: list[str] = []
+        for page_num, page in enumerate(doc, start=1):
+            parts.append(f"[Page {page_num}]")
+            parts.append(page.get_text())
+        doc.close()
+        return "\n".join(parts)
+    except Exception as exc:
+        logger.debug("PDF text extraction failed: %s", exc)
+        return ""
 
 logger = logging.getLogger(__name__)
 
@@ -297,12 +318,17 @@ async def _run_pipeline(
     max_versions: int,
     profile,
     paper_number: Optional[int] = None,
+    full_paper_text: str = "",
 ) -> "PipelineResult":
     """Dispatch a single question to the appropriate pipeline.
 
     kb_context is fetched once here and passed into the pipeline so every
     model call in the pipeline automatically gets the relevant mark schemes,
     examiner reports, grade thresholds, and syllabus as context.
+
+    full_paper_text is the raw text extracted from the uploaded exam paper PDF.
+    It ensures models can look up any tables, figures, or data referenced in
+    questions even when the vision extractor missed them.
     """
     kb_context = build_prompt_context(subject=subject, paper_number=paper_number)
 
@@ -314,6 +340,7 @@ async def _run_pipeline(
             examiner_profile=profile,
             language=lang.value, max_versions=max_versions,
             paper=paper_number,
+            full_paper_text=full_paper_text,
         )
     elif pipeline == Pipeline.ESSAY:
         return await run_pipeline_b(
@@ -323,6 +350,7 @@ async def _run_pipeline(
             examiner_profile=profile,
             language=lang.value, max_versions=max_versions,
             paper=paper_number,
+            full_paper_text=full_paper_text,
         )
     elif pipeline == Pipeline.CS:
         return await run_pipeline_c(
@@ -332,6 +360,7 @@ async def _run_pipeline(
             examiner_profile=profile,
             language=lang.value, max_versions=max_versions,
             paper=paper_number,
+            full_paper_text=full_paper_text,
         )
     else:
         from shark_answer.pipelines.base import PipelineResult as PR
@@ -426,28 +455,47 @@ async def solve_exam_paper(
     max_versions = max(1, min(5, max_versions))
     _last_run_log = {"started": time.strftime("%Y-%m-%d %H:%M:%S"), "subject": subject, "stages": []}
 
-    # Read and convert all uploaded files to image bytes
+    # Read and convert all uploaded files to image bytes; also extract full text
     image_data_list: list[bytes] = []
     filenames: list[str] = []
+    full_paper_texts: list[str] = []
     for upload in images:
         raw_data = await upload.read()
         if not raw_data:
             raise HTTPException(400, f"Empty file: {upload.filename}")
         fname = upload.filename or "unknown"
         filenames.append(fname)
+        # Extract plain text from PDF for table/figure context
+        if fname.lower().endswith(".pdf"):
+            full_paper_texts.append(_extract_text_from_pdf_bytes(raw_data))
         converted = convert_file_to_images(fname, raw_data)
         if not converted:
             logger.warning("Could not convert file '%s'; skipping.", fname)
             continue
         image_data_list.extend(converted)
 
+    # Combine all uploaded paper texts into one context block.
+    # For vision-only subjects (Math, Further Math) the PyMuPDF output is
+    # garbled (equations become isolated characters).  Suppress it so we do
+    # not confuse the solving models with meaningless text.
+    if subject_enum in VISION_ONLY_SUBJECTS:
+        full_paper_text = ""
+    else:
+        full_paper_text = "\n\n".join(t for t in full_paper_texts if t)
+
     if not image_data_list:
         raise HTTPException(422, "No usable image content could be extracted from the uploaded files.")
 
-    # Step 1: Extract questions via AI vision
+    # Step 1: Extract questions via AI vision (whole-paper single-call approach)
     logger.info("Extracting questions from %d image(s) for subject '%s'", len(image_data_list), subject)
-    questions, extract_responses = await extract_questions_from_images(_registry, image_data_list)
-    _cost_tracker.record_batch(extract_responses, subject, "extraction")
+    questions, extract_resp = await extract_questions_whole_paper(_registry, image_data_list, subject)
+    if extract_resp is not None:
+        _cost_tracker.record(extract_resp, subject, "extraction")
+    if not questions:
+        # Fallback: page-by-page extraction if whole-paper failed
+        logger.warning("Whole-paper extraction returned 0 questions — falling back to page-by-page")
+        questions, extract_responses = await extract_questions_from_images(_registry, image_data_list)
+        _cost_tracker.record_batch(extract_responses, subject, "extraction")
     _last_run_log["stages"].append({"stage": "extract", "questions": len(questions)})
 
     if not questions:
@@ -466,7 +514,10 @@ async def solve_exam_paper(
         pipeline = route_question(q, subject_enum)
         logger.info("Processing Q%s via Pipeline %s", q.number, pipeline.value)
         try:
-            pr = await _run_pipeline(q, pipeline, subject, lang, max_versions, profile)
+            pr = await _run_pipeline(
+                q, pipeline, subject, lang, max_versions, profile,
+                full_paper_text=full_paper_text,
+            )
             results.append(pr)
         except Exception as e:
             logger.exception("Error processing Q%s", q.number)
@@ -551,12 +602,15 @@ async def solve_exam_paper_stream(
     # Read all files upfront — must finish before StreamingResponse starts
     image_data_list: list[bytes] = []
     filenames: list[str] = []
+    full_paper_texts_sse: list[str] = []
     for upload in images:
         raw_data = await upload.read()
         if not raw_data:
             raise HTTPException(400, f"Empty file: {upload.filename}")
         fname = upload.filename or "unknown"
         filenames.append(fname)
+        if fname.lower().endswith(".pdf"):
+            full_paper_texts_sse.append(_extract_text_from_pdf_bytes(raw_data))
         converted = convert_file_to_images(fname, raw_data)
         if converted:
             image_data_list.extend(converted)
@@ -564,11 +618,17 @@ async def solve_exam_paper_stream(
     if not image_data_list:
         raise HTTPException(422, "No usable image content could be extracted.")
 
+    # Suppress garbled PyMuPDF text for vision-only subjects (Math, Further Math)
+    if subject_enum in VISION_ONLY_SUBJECTS:
+        full_paper_text_sse = ""
+    else:
+        full_paper_text_sse = "\n\n".join(t for t in full_paper_texts_sse if t)
     profile_name = examiner_profile
     return StreamingResponse(
         _solve_sse_generator(
             image_data_list, filenames, subject_enum, lang,
             max_versions, profile_name, subject,
+            full_paper_text=full_paper_text_sse,
         ),
         media_type="text/event-stream",
         headers={
@@ -587,6 +647,7 @@ async def _solve_sse_generator(
     max_versions: int,
     profile_name: str,
     subject: str,
+    full_paper_text: str = "",
 ) -> AsyncGenerator[str, None]:
     """Async generator that yields SSE-formatted strings during the solve pipeline."""
     global _last_run_log
@@ -602,8 +663,13 @@ async def _solve_sse_generator(
 
         # ── Stage: extract ──
         yield sse("stage", {"id": "extract", "label": "Extracting questions via AI vision...", "done": False})
-        questions, extract_responses = await extract_questions_from_images(_registry, image_data_list)
-        _cost_tracker.record_batch(extract_responses, subject, "extraction")
+        questions, extract_resp = await extract_questions_whole_paper(_registry, image_data_list, subject)
+        if extract_resp is not None:
+            _cost_tracker.record(extract_resp, subject, "extraction")
+        if not questions:
+            # Fallback: page-by-page extraction if whole-paper failed
+            questions, extract_responses = await extract_questions_from_images(_registry, image_data_list)
+            _cost_tracker.record_batch(extract_responses, subject, "extraction")
         _last_run_log["stages"].append({"stage": "extract", "questions": len(questions)})
         t_extract = time.time()
 
@@ -638,7 +704,10 @@ async def _solve_sse_generator(
             })
             pipeline = route_question(q, subject_enum)
             try:
-                pr = await _run_pipeline(q, pipeline, subject, lang, max_versions, profile)
+                pr = await _run_pipeline(
+                    q, pipeline, subject, lang, max_versions, profile,
+                    full_paper_text=full_paper_text,
+                )
             except Exception as e:
                 logger.exception("Error processing Q%s", q.number)
                 pr = PipelineResult(

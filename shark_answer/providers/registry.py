@@ -17,48 +17,59 @@ logger = logging.getLogger(__name__)
 # process the full context before generating.  Different steps have different
 # latency profiles:
 #
-#   SOLVER_TIMEOUT  — answer-writing calls (large context, long generation)
-#   JUDGE_TIMEOUT   — judge/scorer calls (large context, shorter generation)
+#   SOLVER_TIMEOUT  — default for solver models (non-reasoning)
+#   JUDGE_TIMEOUT   — judge / scorer / explain calls
+#   SHORT_TIMEOUT   — fast path for 1–3 mark questions (explicit override)
 #   HEALTH_TIMEOUT  — lightweight debug / health-check probes
 # ──────────────────────────────────────────────────────────────────────────────
 SHORT_TIMEOUT:  float = 30.0   # seconds — fast path for 1–3 mark questions
 JUDGE_TIMEOUT:  float = 45.0   # seconds — judge / scorer / explain calls
-SOLVER_TIMEOUT: float = 60.0   # seconds — solver models writing full answers
+SOLVER_TIMEOUT: float = 60.0   # seconds — default solver timeout (non-reasoning)
 HEALTH_TIMEOUT: float = 10.0   # seconds — debug / health-check probes
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Default model names per provider  (2026 flagship models)
-# TODO: verify exact model strings against each provider's current API docs
-#       before deploying to production.
+# Per-model solver timeouts  (used when caller does NOT pass an explicit timeout)
+# Reasoning models "think" before answering — they need much longer windows.
+# ──────────────────────────────────────────────────────────────────────────────
+MODEL_TIMEOUTS: dict[ModelProvider, float] = {
+    # OpenAI o3-pro: Responses API, can take minutes on hard math
+    ModelProvider.O3PRO:    180.0,
+    # DeepSeek-reasoner: extended chain-of-thought
+    ModelProvider.DEEPSEEK: 120.0,
+    # Qwen qwq-plus: step-by-step reasoning model
+    ModelProvider.QWEN:     90.0,
+    # All others: standard 60 s (set below via .get() default)
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Default model names per provider  (2026 flagship reasoning models)
 # ──────────────────────────────────────────────────────────────────────────────
 DEFAULT_MODELS: dict[ModelProvider, str] = {
-    # Anthropic — Opus 4.5 (stable API alias, 4-6 string returns 404)
-    ModelProvider.CLAUDE:   "claude-opus-4-5",
+    # Anthropic — claude-opus-4-6 (latest Opus; date suffix not supported by API)
+    ModelProvider.CLAUDE:   "claude-opus-4-6",
 
     # OpenAI  — two separate instances from the same API key
-    # GPT4O keeps gpt-4o (vision-safe, known working)
+    # GPT4O keeps gpt-4o (vision-safe, general / essay / CS)
     ModelProvider.GPT4O:    "gpt-4o",
-    # TEMP: org-verification pending → using o3-mini as fallback.
-    # Swap back to "o3-pro" once OpenAI verifies the organisation.
-    ModelProvider.O3PRO:    "o3-mini",          # TODO: revert to "o3-pro"
+    # O3PRO uses the Responses API (see openai_provider.py); fallback → o3
+    ModelProvider.O3PRO:    "o3-pro",
 
-    # DeepSeek  — deepseek-chat = V3.2 non-thinking; deepseek-reasoner = CoT/thinking
-    # Pipeline A (science/math) uses deepseek-reasoner (CoT/thinking mode)
+    # DeepSeek  — deepseek-reasoner = R1 CoT/thinking model (IMO gold medal level)
     ModelProvider.DEEPSEEK: "deepseek-reasoner",
 
-    # Google Gemini  — 2.5 Pro (stable, replaces 3.1-pro-preview)
+    # Google Gemini  — 2.5 Pro
     ModelProvider.GEMINI:   "gemini-2.5-pro",
 
-    # Alibaba Qwen  — Qwen 3.5 Plus
-    ModelProvider.QWEN:     "qwen3.5-plus",
+    # Alibaba Qwen  — qwq-plus: dedicated math/reasoning model (replaces qwen3.5-plus)
+    ModelProvider.QWEN:     "qwq-plus",
 
-    # xAI Grok  — DISABLED: grok-2-vision-1212 returns 404, not worth debugging
+    # xAI Grok  — DISABLED: grok-2-vision-1212 returns 404
     # ModelProvider.GROK:  "grok-2-vision-1212",
 
-    # MiniMax  — Text-01 (confirmed stable API string)
+    # MiniMax  — Text-01 (confirmed stable)
     ModelProvider.MINIMAX:  "MiniMax-Text-01",
 
-    # Moonshot Kimi  — moonshot-v1-128k (standard 128k model, replaces kimi-k2.5 reasoning)
+    # Moonshot Kimi  — moonshot-v1-128k
     ModelProvider.KIMI:     "moonshot-v1-128k",
 
     # Zhipu AI  — GLM-5
@@ -148,7 +159,10 @@ class ProviderRegistry:
         but callers can pass a shorter value (e.g. SHORT_TIMEOUT for fast-path
         questions) to fail-fast on slow providers.
         """
-        _timeout = timeout if timeout is not None else SOLVER_TIMEOUT
+        # If the caller passed an explicit timeout, use it for every provider.
+        # If None (default), apply per-model timeouts from MODEL_TIMEOUTS so that
+        # reasoning models (o3-pro, deepseek-reasoner, qwq-plus) get longer windows.
+        _fixed_timeout = timeout  # None means "use per-model defaults"
         sem = asyncio.Semaphore(self.config.max_concurrent_models)
 
         async def _call(p: ModelProvider) -> ModelResponse:
@@ -159,35 +173,72 @@ class ProviderRegistry:
                         content="", provider=p.value, model_name="",
                         success=False, error="Provider not configured",
                     )
-                logger.info("[%s] Calling...", p.value)
-                try:
-                    resp = await asyncio.wait_for(
-                        inst.generate(
-                            prompt=prompt, system=system,
-                            temperature=temperature, max_tokens=max_tokens,
-                        ),
-                        timeout=_timeout,
-                    )
-                    if resp.success:
-                        in_tok  = resp.usage.input_tokens  if resp.usage else 0
-                        out_tok = resp.usage.output_tokens if resp.usage else 0
-                        logger.info(
-                            "[%s] OK — %d in / %d out tokens",
-                            p.value, in_tok, out_tok,
+                # Per-model timeout: explicit caller value wins; otherwise use
+                # MODEL_TIMEOUTS (for reasoning models) or SOLVER_TIMEOUT default.
+                model_timeout = (
+                    _fixed_timeout
+                    if _fixed_timeout is not None
+                    else MODEL_TIMEOUTS.get(p, SOLVER_TIMEOUT)
+                )
+                # 2-attempt retry: first attempt → wait 3 s → second attempt.
+                # Retry on timeout, API error, OR empty response (success=True but
+                # content="", which Gemini can return on ambiguous vision questions).
+                last_resp: ModelResponse | None = None
+                for attempt in range(2):
+                    if attempt > 0:
+                        logger.info("[%s] Retrying after 3 s (attempt 2/2)...", p.value)
+                        await asyncio.sleep(3)
+                    logger.info("[%s] Calling... (timeout=%.0fs, attempt=%d/2)",
+                                p.value, model_timeout, attempt + 1)
+                    try:
+                        resp = await asyncio.wait_for(
+                            inst.generate(
+                                prompt=prompt, system=system,
+                                temperature=temperature, max_tokens=max_tokens,
+                            ),
+                            timeout=model_timeout,
                         )
-                    else:
-                        logger.warning("[%s] Error: %s", p.value, resp.error)
-                    return resp
-                except asyncio.TimeoutError:
-                    logger.warning("[%s] Timeout after %.0f s", p.value, _timeout)
-                    return ModelResponse(
-                        content="", provider=p.value,
-                        model_name=getattr(inst, "model_name", ""),
-                        success=False, error=f"Timeout after {_timeout:.0f} s",
-                    )
+                        if resp.success and resp.content.strip():
+                            in_tok  = resp.usage.input_tokens  if resp.usage else 0
+                            out_tok = resp.usage.output_tokens if resp.usage else 0
+                            logger.info(
+                                "[%s] OK — %d in / %d out tokens",
+                                p.value, in_tok, out_tok,
+                            )
+                            return resp
+                        elif resp.success and not resp.content.strip():
+                            logger.warning("[%s] Empty response (attempt %d/2)",
+                                           p.value, attempt + 1)
+                            last_resp = ModelResponse(
+                                content="", provider=p.value,
+                                model_name=getattr(inst, "model_name", ""),
+                                success=False, error="Empty response",
+                            )
+                        else:
+                            logger.warning("[%s] Error: %s (attempt %d/2)",
+                                           p.value, resp.error, attempt + 1)
+                            last_resp = resp
+                    except asyncio.TimeoutError:
+                        logger.warning("[%s] Timeout after %.0f s (attempt %d/2)",
+                                       p.value, model_timeout, attempt + 1)
+                        last_resp = ModelResponse(
+                            content="", provider=p.value,
+                            model_name=getattr(inst, "model_name", ""),
+                            success=False, error=f"Timeout after {model_timeout:.0f} s",
+                        )
+                # Both attempts failed — return last known failure
+                return last_resp or ModelResponse(
+                    content="", provider=p.value,
+                    model_name=getattr(inst, "model_name", ""),
+                    success=False, error="Both attempts failed",
+                )
 
         results = await asyncio.gather(*[_call(p) for p in providers])
-        return list(results)
+        result_list = list(results)
+
+        # Per-model 2-attempt retry (inside _call above) already handles transient
+        # failures — no post-hoc batch retry needed.
+        return result_list
 
     async def call_with_fallback(
         self,
